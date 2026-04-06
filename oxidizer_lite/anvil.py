@@ -105,8 +105,10 @@ class SQLEngine(Residue):
 
         connection_str = f"""
             INSTALL s3;
+            INSTALL aws;
             INSTALL iceberg;
             LOAD s3;
+            LOAD aws;
             LOAD iceberg;
             {secret_string}
             ATTACH '{details.aws_account_id}' AS {details.name} (TYPE ICEBERG, ENDPOINT_TYPE GLUE);
