@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oxidizer-lite"
-version = "0.1.1"
+version = "0.1.2"
 requires-python = ">=3.10"
 description = "A distributed, event-driven DAG orchestration engine built on Redis Streams"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 license = { text = "MIT" }
 authors = [
     { name = "Moos Engineering" }
