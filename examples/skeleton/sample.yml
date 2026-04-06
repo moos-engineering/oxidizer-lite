@@ -1,0 +1,115 @@
+version: 1
+name: sample
+
+connections:
+  - name: sample_api
+    type: api
+    base_url: https://jsonplaceholder.typicode.com
+
+  
+  - name: glue_data_lake
+    type: glue_catalog
+    aws_sso_profile: your-sso-profile
+    aws_region: us-west-2
+    aws_account_id: 123456789012
+    aws_s3_bucket: your-lakehouse-bucket
+
+
+layers:
+  - name: bronze
+    nodes:
+      - name: fetch_data 
+        inputs:
+          - ref: null
+            alias: fetch_data
+            methods: 
+              - method: api
+                connection: sample_api
+                endpoint: /posts
+                http_method: GET
+        outputs:
+          methods: 
+            - method: stream
+  - name: silver
+    nodes:
+      - name: transform_data
+        inputs:
+          - ref: bronze.fetch_data
+            alias: fetch_data
+            methods: 
+              - method: stream
+        outputs:
+          methods: 
+            - method: stream
+  - name: gold
+    nodes:
+      - name: load_data
+        inputs:
+          - ref: silver.transform_data
+            alias: transform_data
+            methods: 
+              - method: stream
+        schema:
+          - name: userId
+            type: int
+            description: ID of the user who created the post
+          - name: id
+            type: int
+            description: Unique identifier for the post
+          - name: title
+            type: string
+            description: Title of the post
+          - name: body
+            type: string
+            description: Content of the post
+        outputs:
+          methods: 
+            - method: sql
+              connection: glue_data_lake
+              database: oxidizer
+              table: posts 
+              sql_type: insert
+      - name: load_data_2
+        inputs:
+          - ref: gold.load_data
+            alias: load_data
+            methods: 
+              - method: sql
+                connection: glue_data_lake
+                batch_size: 1000
+                database: oxidizer
+                table: posts 
+                sql_type: select
+                columns: 
+                  - name: userId
+                  - name: id
+                  - name: title
+                  - name: body
+                filters: 
+                  - column: userId
+                    operator: ">"
+                    value: 5 
+                sort_by: 
+                  - column: id
+                    order: desc
+                limit: null
+        schema:
+          - name: userId
+            type: int
+            description: ID of the user who created the post
+          - name: id
+            type: int
+            description: Unique identifier for the post
+          - name: title
+            type: string
+            description: Title of the post
+          - name: body
+            type: string
+            description: Content of the post
+        outputs:
+          methods: 
+            - method: sql
+              connection: glue_data_lake
+              database: oxidizer
+              table: posts_copy 
+              sql_type: insert

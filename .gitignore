@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+*.egg
+.eggs/
+*.whl
+
+# Virtual environments
+.env/
+.venv/
+venv/
+ENV/
+env/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Compiled extensions
+*.so
+*.dylib
+*.dll
+*.dSYM/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Linting / Type checking
+.ruff_cache/
+.mypy_cache/
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# DuckDB
+*.db
+*.db.wal
+*.parquet
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# MinIO data
+minio-data/
+
+# Logs and temp files
+*.log
+*.tmp
+*.test
+
+# Secrets
+*.env
+secrets/
+.coverage.*
+.cache/
+
+# Ignore other
+*.bak
+*.old
+*.orig
