@@ -41,6 +41,7 @@ class Microscope(Residue):
                 allow_headers=["*"],
             )
         ]
+        self._register_oxidizer_api_routes()
         self._register_oxidizer_mcp_tools()
         self._register_anvil_mcp_tools()
 
@@ -59,7 +60,7 @@ class Microscope(Residue):
             Returns:
                 HTMLResponse: The HTML content of the UI page.
             """
-            ui_file = resources.files("oxidizer").joinpath("ui.html")
+            ui_file = resources.files("oxidizer_lite").joinpath("ui.html")
             html = ui_file.read_text(encoding="utf-8")
             return HTMLResponse(html)
 
