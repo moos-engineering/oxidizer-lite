@@ -1,5 +1,6 @@
 # S3
 import boto3
+from botocore.exceptions import TokenRetrievalError, ClientError
 
 from oxidizer_lite.residue import Residue, Ash
 

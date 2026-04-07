@@ -27,7 +27,8 @@ class Residue:
     """
 
     LOG_TTL = 3600  # Default TTL in seconds for Redis log keys
-    REDIS_LOG_KEYS = {"lattice_id", "run_id", "node_id"}
+    REDIS_LOG_KEYS_NODE = {"lattice_id", "run_id", "node_id"}  # Full context for node/worker logs
+    REDIS_LOG_KEYS_CONTROLLER = {"lattice_id", "run_id"}       # Controller-level logs (no node_id)
 
     def __init__(self, component_name: str = "oxidizer"):
         """
@@ -64,14 +65,28 @@ class Residue:
 
     def _redis_log(self, level: Ash, message: str, **kwargs) -> None:
         """
-        Append a log entry to Redis if the caller passed lattice_id, run_id,
-        and node_id AND this instance has a catalyst attribute.
-        Key: oxidizer:logs:{lattice_id}:{run_id}:{node_id}:{level}
+        Append a log entry to Redis based on available context.
+        
+        Key patterns (3-tier):
+        - Node/Worker:   oxidizer:logs:{lattice_id}:{run_id}:{node_id}:{level}
+        - Controller:    oxidizer:logs:{lattice_id}:{run_id}:_controller:{level}
+        - System:        oxidizer:logs:_system:{level}
         """
         catalyst = getattr(self, "catalyst", None)
-        if catalyst is None or not self.REDIS_LOG_KEYS.issubset(kwargs):
+        if catalyst is None:
             return
-        key = f"oxidizer:logs:{kwargs['lattice_id']}:{kwargs['run_id']}:{kwargs['node_id']}:{level.name}"
+        
+        # Determine which tier based on available context
+        has_node_context = self.REDIS_LOG_KEYS_NODE.issubset(kwargs)
+        has_controller_context = self.REDIS_LOG_KEYS_CONTROLLER.issubset(kwargs) and "node_id" not in kwargs
+        
+        if has_node_context:
+            key = f"oxidizer:logs:{kwargs['lattice_id']}:{kwargs['run_id']}:{kwargs['node_id']}:{level.name}"
+        elif has_controller_context:
+            key = f"oxidizer:logs:{kwargs['lattice_id']}:{kwargs['run_id']}:_controller:{level.name}"
+        else:
+            key = f"oxidizer:logs:_system:{level.name}"
+        
         entry = {
             "timestamp": time.time(),
             "level": level.name,

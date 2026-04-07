@@ -194,12 +194,10 @@ asyncio.run(main())
 
 
 ## TODO:
-[ ] Update Controller to Not Exit On Redis Removal  
 [ ] Add Pause / Resume Functionality  
 [ ] Scheduling - This will come with Rust Integration  
 [ ] Node Retry Logic (How to Test)
 [ ] Data Retreival Fallback Updates  
-[ ] Update DuckLake to Use Catalog (Remove USE ___)  
 [ ] Improve Memory Metric Capture (Maybe Switch to Rust? Maybe update CheckpointMetadata?)
 [ ] Add Default Override to Config - If Defaults in Config global, layer, node level - override the in code defaults
 [ ] Ensure TTL on All Necessary keys / streams / etc. 

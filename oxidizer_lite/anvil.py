@@ -62,7 +62,6 @@ class SQLEngine(Residue):
                 USE_SSL {str(details.s3_use_ssl).lower()}
             );
             ATTACH 'ducklake:postgres:dbname={details.postgres_db}' AS {details.name} (DATA_PATH 's3://{details.s3_bucket}/{details.s3_prefix}', AUTOMATIC_MIGRATION TRUE, OVERRIDE_DATA_PATH TRUE);
-            USE {details.name};
         """
         return connection_str
     
@@ -146,6 +145,7 @@ class SQLEngine(Residue):
             databases = [row[0] for row in self.connection.execute(f"SELECT schema_name FROM information_schema.schemata WHERE catalog_name = '{self.catalog}'").fetchall()]
             return database_name in databases
         elif self.catalog_type == "ducklake":
+            # XXX
             # Use SHOW DATABASES or equivalent to check if the database exists in DuckLake
             databases = [row[0] for row in self.connection.execute("SHOW DATABASES").fetchall()]
             return database_name in databases
@@ -162,7 +162,7 @@ class SQLEngine(Residue):
         if self.catalog_type == "glue_catalog":
             self.residue(self.ash.WARNING, f"Currently Unsupported at this time. Ensure the database '{database_name}' exists in Glue Catalog.")
         elif self.catalog_type == "ducklake":
-            self.connection.execute(f"CREATE SCHEMA {database_name}")
+            self.connection.execute(f"CREATE SCHEMA IF NOT EXISTS {self.catalog}.{database_name}")
         else:
             raise ValueError(f"Unsupported Catalog Type: {self.catalog_type}")
         
@@ -221,17 +221,17 @@ class SQLEngine(Residue):
             # FUTURE 
 
         elif self.catalog_type == "ducklake":
-            create_table_query = f"CREATE TABLE IF NOT EXISTS {database_name}.{table_name} ({columns_def})"
+            create_table_query = f"CREATE TABLE IF NOT EXISTS {self.catalog}.{database_name}.{table_name} ({columns_def})"
             self.connection.execute(create_table_query)
             # Add Column Descriptions or Comments
             for col in schema:
                 if "description" in col:
                     comment = col["description"]
                     col_name = col["name"]
-                    self.connection.execute(f"COMMENT ON COLUMN {database_name}.{table_name}.{col_name} IS '{comment}'")
+                    self.connection.execute(f"COMMENT ON COLUMN {self.catalog}.{database_name}.{table_name}.{col_name} IS '{comment}'")
             # Table comment support can be added here if needed
             if table_description:
-                self.connection.execute(f"COMMENT ON TABLE {database_name}.{table_name} IS '{table_description}'")
+                self.connection.execute(f"COMMENT ON TABLE {self.catalog}.{database_name}.{table_name} IS '{table_description}'")
         else:
             raise ValueError(f"Unsupported Catalog Type: {self.catalog_type}")
 
@@ -361,10 +361,10 @@ class SQLEngine(Residue):
         if self.catalog_type == "glue_catalog":
             sql = f"INSERT INTO {self.catalog}.{database}.{table_name} SELECT * FROM {source_table}"
         elif self.catalog_type == "ducklake":
-            sql = f"INSERT INTO {database}.{table_name} SELECT * FROM {source_table}"
+            sql = f"INSERT INTO {self.catalog}.{database}.{table_name} SELECT * FROM {source_table}"
         else:
             raise ValueError(f"Unsupported Catalog Type: {self.catalog_type}")
-        self.residue(self.ash.INFO, f"Insert query built for {database}.{table_name} from source {source_table}")
+        self.residue(self.ash.INFO, f"Insert query built for {self.catalog}.{database}.{table_name} from source {source_table}")
         return sql
         
     def scd_type2_query_str(self, database, table_name, source_table: str, columns: list[str], primary_key: list[str], begin_date_col: str, end_date_col: str, is_current_col: str = "is_current", tracked_columns: list[str] = None, timestamp_expr: str = "CURRENT_TIMESTAMP"):
@@ -713,7 +713,7 @@ class SQLEngine(Residue):
             str | list: JSON string of the batch data, or an empty list if the batch index is out of range.
         """
         results = self.connection.execute(query)
-        batch_reader = results.fetch_record_batch(rows_per_batch=batch_size)
+        batch_reader = results.to_arrow_reader(batch_size=batch_size)
         for idx, batch in enumerate(batch_reader):
             if idx == batch_idx:
                 batch_data = batch.to_pylist()  # Convert the RecordBatch to JSON format for easier handling downstream. Adjust as needed for different formats or data handling requirements.

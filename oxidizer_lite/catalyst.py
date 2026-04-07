@@ -2,6 +2,7 @@
 
 import redis 
 from redis.commands.json.path import Path 
+from redis.exceptions import ResponseError, ConnectionError as RedisConnectionError
 import json
 
 from oxidizer_lite.residue import Residue
