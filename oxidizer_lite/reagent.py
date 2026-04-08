@@ -207,6 +207,7 @@ class Reagent(Residue):
             list: A list of data records returned from the SQL query.
         """
         self.residue(self.ash.INFO, f"PRE PROCESS: Processing Incoming Data using SQL retrieval strategy", database=method.database, table=method.table, sql_type=method.sql_type, batch_size=method.batch_size) 
+        self.residue(self.ash.DEBUG, f"SQL method filters", filters=method.filters, columns=method.columns)
         
         # SQL Connection Details
         method_connection = method.connection
@@ -302,16 +303,28 @@ class Reagent(Residue):
                 # Both methods now return a list of queries to handle intra-batch duplicates
                 # Use UPDATE+INSERT for Iceberg (no MERGE support), MERGE for DuckLake
                 if sql_engine.catalog_type == "glue_catalog":
-                    queries = sql_engine.scd_type2_update_insert_query_strs(**scd_kwargs)
-                    for q in queries:
-                        sql_engine.exectute_single_query(q)
-                    self.residue(self.ash.INFO, f"SCD Type 2 UPDATE+INSERT completed for {database}.{table} in {engine_name}", database=database, table=table, engine_name=engine_name)
+                    try: 
+                        queries = sql_engine.scd_type2_update_insert_query_strs(**scd_kwargs)
+                        sql_engine.exectute_single_query("BEGIN TRANSACTION") # Start a Transaction
+                        for q in queries:
+                            sql_engine.exectute_single_query(q)
+                        sql_engine.exectute_single_query("COMMIT")  # Commit the transaction
+                        self.residue(self.ash.INFO, f"SCD Type 2 UPDATE+INSERT completed for {database}.{table} in {engine_name}", database=database, table=table, engine_name=engine_name)
+                    except Exception as e:
+                        sql_engine.exectute_single_query("ROLLBACK")  # Rollback the transaction on error
+                        self.residue(self.ash.ERROR, f"Error during SCD Type 2 UPDATE+INSERT for {database}.{table} in {engine_name}", error=str(e), database=database, table=table, engine_name=engine_name) 
                 else:
-                    queries = sql_engine.scd_type2_query_str(**scd_kwargs)
-                    for q in queries:
-                        sql_engine.exectute_single_query(q)
-                    self.residue(self.ash.INFO, f"SCD Type 2 merge completed for {database}.{table} in {engine_name}", database=database, table=table, engine_name=engine_name)
-
+                    try:
+                        queries = sql_engine.scd_type2_query_str(**scd_kwargs)
+                        sql_engine.exectute_single_query("BEGIN TRANSACTION") # Start a Transaction
+                        for q in queries:
+                            sql_engine.exectute_single_query(q)
+                        sql_engine.exectute_single_query("COMMIT")  # Commit the transaction
+                        self.residue(self.ash.INFO, f"SCD Type 2 merge completed for {database}.{table} in {engine_name}", database=database, table=table, engine_name=engine_name)
+                    except Exception as e:
+                        sql_engine.exectute_single_query("ROLLBACK")  # Rollback the transaction on error
+                        self.residue(self.ash.ERROR, f"Error during SCD Type 2 merge for {database}.{table} in {engine_name}", error=str(e), database=database, table=table, engine_name=engine_name)
+                        
             # Cleanup Staging Table
             sql_engine.drop_staging_table(staging_table)
 

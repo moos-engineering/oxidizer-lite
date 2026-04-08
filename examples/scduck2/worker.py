@@ -71,6 +71,7 @@ def process(data: dict, context: dict):
 
     # Gold: pass through current records to stream
     if node_id == "gold.publish_weather":
+        print("HEREEEE", data)
         return data["weather_scd2"]
 
     return []

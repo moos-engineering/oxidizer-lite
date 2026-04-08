@@ -6,7 +6,7 @@ connections:
     type: api
     base_url: https://api.open-meteo.com
 
-  - name: ducklake
+  - name: data_lake
     type: ducklake
     s3_endpoint: localhost:9000
     s3_access_key_id: minioadmin
@@ -65,7 +65,7 @@ layers:
         outputs:
           methods:
             - method: sql
-              connection: ducklake
+              connection: data_lake
               database: oxidizer
               table: weather_bronze
               sql_type: insert
@@ -78,7 +78,7 @@ layers:
             alias: fetch_weather
             methods:
               - method: sql
-                connection: ducklake
+                connection: data_lake
                 database: oxidizer
                 table: weather_bronze
                 sql_type: select
@@ -132,7 +132,7 @@ layers:
         outputs:
           methods:
             - method: sql
-              connection: ducklake
+              connection: data_lake
               database: oxidizer
               table: weather_silver
               sql_type: scd_type_2
@@ -157,7 +157,7 @@ layers:
             alias: weather_scd2
             methods:
               - method: sql
-                connection: ducklake
+                connection: data_lake
                 database: oxidizer
                 table: weather_silver
                 sql_type: select
@@ -206,4 +206,3 @@ layers:
         outputs:
           methods:
             - method: stream
-              stream_name: weather_current

@@ -281,9 +281,19 @@ class SQLEngine(Residue):
                     col = condition["column"]
                     op = condition["operator"]
                     val = condition["value"]
-                    if isinstance(val, str):
-                        val = f"'{val}'"  # Quote string values
-                    where_clauses.append(f"{col} {op} {val}")
+                    # Handle boolean values specially for DuckLake compatibility
+                    # DuckLake has issues with "column = true" but "column" works
+                    if isinstance(val, bool) and op == "=":
+                        if val:
+                            where_clauses.append(f"{col}")
+                        else:
+                            where_clauses.append(f"NOT {col}")
+                    elif isinstance(val, str):
+                        where_clauses.append(f"{col} {op} '{val}'")
+                    elif isinstance(val, bool):
+                        where_clauses.append(f"{col} {op} {'true' if val else 'false'}")
+                    else:
+                        where_clauses.append(f"{col} {op} {val}")
                 where = " AND ".join(where_clauses)
             elif isinstance(where, str):
                 pass  # Use as is
@@ -315,6 +325,7 @@ class SQLEngine(Residue):
         if limit is not None:
             sql += f" LIMIT {limit}"
         
+        self.residue(self.ash.DEBUG, f"Generated SELECT query", query=sql)
         return sql
     
     def load_staging_table(self, data: list[dict], staging_table: str = "staging"):
