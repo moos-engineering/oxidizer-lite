@@ -56,6 +56,23 @@ class InputStreamMethod:
         return asdict(self)
 
 @dataclass
+class InputSQSMethod:
+    method: str
+    batch_size: int = DEFAULTS.DEFAULT_BATCH_SIZE
+    wait_time: int = DEFAULTS.DEFAULT_BLOCKING_TIMEOUT  # seconds to wait for messages before considering input complete
+    connection: dict = None # UPDATE WITH DIFFERENT CONNECTION TYPES
+    queue_name: str = None 
+
+    def to_dict(self):
+        """
+        Converts the InputSQSMethod to a dictionary.
+        
+        Returns:
+            dict: A dictionary representation of the dataclass.
+        """
+        return asdict(self)
+
+@dataclass
 class InputSQLMethod:
     method: str
     connection: dict # UPDATE WITH DIFFERENT CONNECTION TYPES  
@@ -338,7 +355,23 @@ class APIConnection:
         return asdict(self)
 
 
+@dataclass 
+class SQSConnection:
+    name: str
+    aws_sso_profile: str
+    aws_region: str
+    aws_account_id: str
+    queue_name: str
+    type: str = "sqs"
 
+    def to_dict(self):
+        """
+        Converts the SQSConnection to a dictionary.
+        
+        Returns:
+            dict: A dictionary representation of the dataclass.
+        """
+        return asdict(self)
 
 
 
@@ -353,7 +386,7 @@ class TaskMessage:
     worker_id: str  = "worker-" + socket.gethostname() + "-" + str(uuid.uuid4())
     timestamp: float = time.time()
     node_configuration: NodeConfiguration = None
-    connections: List[APIConnection | GlueCatalogConnection | DuckLakeConnection] = field(default_factory=list)
+    connections: List[APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection] = field(default_factory=list)
 
 
     # Export as JSON

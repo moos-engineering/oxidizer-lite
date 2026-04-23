@@ -13,6 +13,13 @@ connections:
     aws_account_id: 123456789012
     aws_s3_bucket: your-lakehouse-bucket
 
+  - name: sqs_queue
+    type: sqs
+    aws_sso_profile: your-sso-profile
+    aws_region: us-west-2
+    aws_account_id: 123456789012
+    queue_name: weather_updates_queue
+
 
 layers:
   - name: bronze
@@ -61,6 +68,36 @@ layers:
               database: oxidizer
               table: weather_bronze
               sql_type: insert
+      - name: fetch_sqs_updates
+        inputs:
+          - ref: null
+            alias: fetch_sqs_updates
+            methods:
+              - method: sqs
+                connection: sqs_queue
+                max_messages: 10
+                wait_time_seconds: 20
+        schema:
+          - name: message_id
+            type: string
+            description: Unique identifier for the SQS message
+          - name: body
+            type: string
+            description: The content of the SQS message, expected to contain updated weather data in JSON format
+          - name: receipt_handle
+            type: string
+            description: Receipt handle for the SQS message, used for deleting the message after processing
+          - name: attributes
+            type: map<string, string>
+            description: Additional metadata attributes associated with the SQS message (e.g., timestamps, sender info)
+        outputs:
+          methods:
+            - method: sql
+              connection: glue_data_lake
+              database: oxidizer
+              table: weather_updates_bronze
+              sql_type: insert
+
 
   - name: silver
     nodes:

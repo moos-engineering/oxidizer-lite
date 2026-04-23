@@ -7,11 +7,11 @@ import socket
 from functools import wraps
 from memory_profiler import memory_usage
 
-from oxidizer_lite.anvil import APIEngine, SQLEngine
+from oxidizer_lite.anvil import APIEngine, SQLEngine, SQSEngine
 from oxidizer_lite.residue import Residue
 from oxidizer_lite.catalyst import Catalyst, CatalystConnection
 from oxidizer_lite.topology import WorkerMessageType, WorkerTaskType
-from oxidizer_lite.phase import GlueCatalogConnection, TaskMessage, NodeConfiguration, ErrorDetails, OutputSQLMethod, InputSQLMethod, InputStreamMethod, InputAPIMethod, OutputStreamMethod, OutputAPIMethod, APIConnection, DuckLakeConnection, ErrorDetails
+from oxidizer_lite.phase import GlueCatalogConnection, TaskMessage, NodeConfiguration, ErrorDetails, OutputSQLMethod, InputSQLMethod, InputStreamMethod, InputAPIMethod, OutputStreamMethod, OutputAPIMethod, APIConnection, DuckLakeConnection, ErrorDetails, SQSConnection, InputSQSMethod
 
 
 class Reagent(Residue):
@@ -100,7 +100,7 @@ class Reagent(Residue):
         self.catalyst.write_to_stream(self.controller_stream, oxidizer_task.to_dict()) 
 
 
-    def _lattice_connections_lookup(self, connections: list[APIConnection | GlueCatalogConnection | DuckLakeConnection]):
+    def _lattice_connections_lookup(self, connections: list[APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection]):
         """
         Creates a lookup dictionary for lattice connections by name.
         
@@ -120,6 +120,8 @@ class Reagent(Residue):
                 connection = DuckLakeConnection(**connection)
             elif type == "api":
                 connection = APIConnection(**connection)
+            elif type == "sqs":
+                connection = SQSConnection(**connection)
             else:
                 self.residue(self.ash.ERROR, f"Unknown connection type '{type}' for connection '{name}' in lattice configuration.", connection=connection)
                 continue
@@ -193,7 +195,38 @@ class Reagent(Residue):
             self.catalyst.write_to_stream(stream, msg)
         return 
 
-    def _handle_incoming_sql(self, method: InputSQLMethod, connections_lookup: dict[str, APIConnection | DuckLakeConnection], batch_idx: int, batch_size: int):
+    def _handle_incoming_sqs(self, method: InputSQSMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection]):
+        """
+        Handles incoming data for a node from an SQS queue.
+        
+        Args:
+            method (InputSQSMethod): The SQS method details including connection, batch size, and wait time.
+            connections_lookup (dict): A dictionary mapping connection names to their typed connection objects.
+        Returns:
+            tuple: A tuple of (data, future_ack_msgs) where data is a list of records and future_ack_msgs is a list of receipt handles to acknowledge after processing.
+        """
+        self.residue(self.ash.INFO, f"Fetching data from upstream dependency using SQS retrieval strategy", **method.to_dict()) 
+        
+        # Connection Details
+        method_connection = method.connection
+        connection = connections_lookup.get(method_connection) 
+        
+        # SQS Engine
+        sqs_engine = SQSEngine(connection) 
+        
+        # Fetch Messages from SQS Queue
+        raw_messages = sqs_engine.receive_messages(method.batch_size, method.wait_time)
+        
+        data = []
+        future_ack_msgs = []
+        for msg in raw_messages:
+            data.append(msg.body) 
+            future_ack_msgs.append(msg.receipt_handle) 
+        return data, future_ack_msgs
+
+    
+    
+    def _handle_incoming_sql(self, method: InputSQLMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection], batch_idx: int, batch_size: int):
         """
         Handles incoming data for a node by executing a SQL query and returning the results.
         
@@ -241,7 +274,7 @@ class Reagent(Residue):
         sql_engine.close()
         return data
 
-    def _handle_outgoing_sql(self, method: OutputSQLMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection], schema: dict, data: list, table_description=None):
+    def _handle_outgoing_sql(self, method: OutputSQLMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection], schema: dict, data: list, table_description=None):
         """
         Handles outgoing data for a node by writing records to a SQL database.
         

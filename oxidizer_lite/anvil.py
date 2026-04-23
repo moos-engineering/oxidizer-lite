@@ -755,8 +755,80 @@ class SQLEngine(Residue):
         # self.connection.close()
         self.connection = None
 
+class KafkaEngine(Residue):
+    def __init__(self, connection_details):
+        """
+        Initializes the KafkaEngine with Kafka connection details.
+        
+        Args:
+            connection_details (dict): Configuration for connecting to the Kafka cluster.
+        """
+        super().__init__(component_name="kafka_engine")
+        self.connection_details = connection_details
+    
+    def kafka_auth(self):
+        """
+        Authenticates with the Kafka cluster if necessary.
+        """
+        pass
 
+    def produce(self, topic, message):
+        """
+        Produces a message to a specified Kafka topic.
+        
+        Args:
+            topic (str): The name of the Kafka topic to produce to.
+            message (str | dict): The message payload to send. If dict, it will be serialized to JSON.
+        
+        Returns:
+            bool: True if the message was produced successfully, False otherwise.
+        """
+        pass
+    
+class SQSEngine(Residue):
+    def __init__(self, connection_details):
+        """
+        Initializes the SQSEngine with AWS SQS connection details.
+        
+        Args:
+            connection_details (dict): Configuration for connecting to AWS SQS.
+        """
+        super().__init__(component_name="sqs_engine")
+        self.connection_details = connection_details
+        print("++++++++++++++")
+        print("Initialized SQSEngine with connection details:", self.connection_details)
+        print("++++++++++++++")
+    def sqs_auth(self):
+        """
+        Authenticates with the AWS SQS service.
+        """
+        pass
 
+    def send_message(self, queue_url, message_body):
+        """
+        Sends a message to a specified SQS queue.
+        
+        Args:
+            queue_url (str): The URL of the SQS queue to send the message to.
+            message_body (str | dict): The message payload to send. If dict, it will be serialized to JSON.
+        
+        Returns:
+            bool: True if the message was sent successfully, False otherwise.
+        """
+        pass
+
+    def read_messages(self, queue_url, max_messages=10):
+        """
+        Reads messages from a specified SQS queue.
+        
+        Args:
+            queue_url (str): The URL of the SQS queue to read messages from.
+            max_messages (int): The maximum number of messages to read in one call. Defaults to 10.
+        
+        Returns:
+            list: A list of messages retrieved from the SQS queue.
+        """
+        pass
 
 
 class APIEngine(Residue):
