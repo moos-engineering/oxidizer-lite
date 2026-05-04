@@ -8,7 +8,7 @@ import json
 from oxidizer_lite.phase import DuckLakeConnection, GlueCatalogConnection
 from oxidizer_lite.residue import Residue, Ash
 
-
+ 
 
 class SQLEngine(Residue):
     
@@ -852,20 +852,21 @@ class APIEngine(Residue):
         Set up the API connection based on the provided connection details, including authentication if specified.
         """
         self.base_url = self.connection_details.get("base_url", "")
-        if self.connection_details.get("auth"):
-            auth_details = self.connection_details["auth"]
-            if auth_details["type"] == "auth_token":
-                token = auth_details["token"]
+        if self.connection_details.get("authentication"):
+            self.residue(self.ash.INFO, "Setting up API authentication", auth_type=self.connection_details["authentication"]["auth_type"])
+            auth_details = self.connection_details["authentication"]
+            if auth_details["auth_type"] == "bearer":
+                token = auth_details["credentials"]["token"]
                 self.session.headers.update({"Authorization": f"Bearer {token}"})
-            elif auth_details["type"] == "api_key":
-                key_name = auth_details["key_name"]
-                key_value = auth_details["key_value"]
+            elif auth_details["auth_type"] == "api_key":
+                key_name = auth_details["credentials"]["key_name"]
+                key_value = auth_details["credentials"]["key_value"]
                 self.session.headers.update({key_name: key_value})
             else:
-                raise ValueError(f"Unsupported authentication type: {auth_details['type']}")
+                raise ValueError(f"Unsupported authentication type: {auth_details['auth_type']}")
 
 
-    def get(self, endpoint, params=None):
+    def get(self, endpoint, params=None, cursor=None):
         """
         Makes a GET request to the specified API endpoint with optional query parameters.
         
@@ -876,7 +877,10 @@ class APIEngine(Residue):
         Returns:
             dict: JSON response from the API.
         """
-        url = f"{self.base_url}{endpoint}" 
+        if cursor is not None:
+            url = cursor  # Use the cursor URL directly for pagination if provided
+        else:
+            url = f"{self.base_url}{endpoint}" 
         response = self.session.get(url, params=params)
         return self._handle_response(response)
 

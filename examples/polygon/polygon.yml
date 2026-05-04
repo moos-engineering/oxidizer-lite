@@ -1,0 +1,31 @@
+version: 1
+name: polygon
+
+connections:
+  - name: polygon_api
+    type: api
+    base_url: https://api.massive.com
+    authentication:
+      auth_type: bearer
+      credentials: 
+        token: BEARER_TOKEN_HERE
+
+
+layers:
+  - name: bronze
+    nodes:
+      - name: market_status 
+        inputs:
+          - ref: null
+            alias: market_status
+            methods: 
+              - method: api
+                connection: polygon_api
+                endpoint: /v3/reference/options/contracts?underlying_ticker=AAPL&expired=true&order=asc&limit=1000&sort=ticker
+                http_method: GET
+                path: $.results
+                paginator: next_url
+        outputs:
+          methods: 
+            - method: stream
+  

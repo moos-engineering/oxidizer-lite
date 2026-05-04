@@ -102,6 +102,8 @@ class InputAPIMethod:
     endpoint: str
     http_method: str
     payload_template: dict = None
+    path: str = None # JSON path to extract relevant data from API response
+    paginator: str = None # JSON path to extract the next page URL from API response
 
     def to_dict(self):
         """

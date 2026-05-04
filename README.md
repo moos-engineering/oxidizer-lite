@@ -22,7 +22,7 @@ pip install -e .
 
 ```bash
 # Redis (with JSON module)
-docker run -d --name redis -p 6379:6379 redis/redis-stack:latest
+docker run -d --name redis -p 6379:6379 -p 8001:8001 redis/redis-stack:latest
 
 # MinIO (S3-compatible storage)
 docker run -d --name minio -p 9000:9000 -p 9001:9001 \

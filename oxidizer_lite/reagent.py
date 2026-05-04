@@ -15,18 +15,20 @@ from oxidizer_lite.phase import GlueCatalogConnection, TaskMessage, NodeConfigur
 
 
 class Reagent(Residue):
-    def __init__(self, catalyst: CatalystConnection):
+    def __init__(self, catalyst: CatalystConnection, auto_react: bool = False):
         """
         Initializes the Reagent worker with a Catalyst connection, streams, and consumer groups.
         
         Args:
             catalyst (CatalystConnection): The Redis connection configuration for the Catalyst cache engine.
+            auto_react (bool): Whether the Reagent should automatically react to tasks.
         """
         super().__init__(component_name="reagent")
 
         self.oxidizer_ascii_art()
 
         self.catalyst = Catalyst(catalyst)  
+        self.auto_react = auto_react
 
         # Oxidizer Streams and Consumer Group Names
         self.oxidizer_consumer_group = "worker-group" 
@@ -128,7 +130,7 @@ class Reagent(Residue):
             connections_dict[name] = connection
         return connections_dict
 
-    def _update_checkpoint_metadata(self, task: TaskMessage, input_final:dict, input_methods:dict):
+    def _update_checkpoint_metadata(self, task: TaskMessage, input_final:dict, input_methods:dict, input_cursors: dict = None):
         """
         Updates the checkpoint metadata based on input completion status and methods used.
         
@@ -136,7 +138,7 @@ class Reagent(Residue):
             task (TaskMessage): The task message containing the node configuration and checkpoint metadata to update in place.
             input_final (dict): A dictionary mapping input identifiers to booleans indicating whether each input has completed.
             input_methods (dict): A dictionary mapping input identifiers to their retrieval method type strings.
-        
+            input_cursors (dict): A dictionary mapping input identifiers to their current cursor or pagination state.
         Returns:
             TaskMessage: The updated task message with modified checkpoint metadata.
         """
@@ -144,9 +146,11 @@ class Reagent(Residue):
         if all(input_final.values()):  
             task.node_configuration.checkpoint_metadata.is_final = True
             task.node_configuration.checkpoint_metadata.batch_methods = input_methods 
+            task.node_configuration.checkpoint_metadata.batch_cursors = input_cursors
         else:  
             task.node_configuration.checkpoint_metadata.is_final = False
             task.node_configuration.checkpoint_metadata.batch_methods = input_methods
+            task.node_configuration.checkpoint_metadata.batch_cursors = input_cursors
             # FUTURE: Fix How to Handle Partial + Full Batches
             print("ADD LATER - BUT THIS SHOULD FAIL... OR WE NEED HANDLE IT SPECIAL or ADJUST BATCH SIZES = THIS IS FOR MULTIPLE INPUTS")
         return task
@@ -365,7 +369,7 @@ class Reagent(Residue):
         return 
 
 
-    def _handle_incoming_api(self, method: InputAPIMethod, connections_lookup: dict[str, APIConnection | DuckLakeConnection]):
+    def _handle_incoming_api(self, method: InputAPIMethod, connections_lookup: dict[str, APIConnection | DuckLakeConnection], cursor: str = None):
         """
         Handles incoming data for a node by making an API call and returning the response.
         
@@ -385,23 +389,31 @@ class Reagent(Residue):
         # API Call Details
         endpoint = method.endpoint
         request_method = method.http_method
-        # FUTURE: Fix - This needs updates
-        data_selector = method.payload_template 
-        
+        data_selector = method.path 
+        paginator = method.paginator
+        next_cursor = None
+
         # API Engine
         api = APIEngine(connection.to_dict()) 
         
         # Make API Call Based on Request Method
         if request_method == "GET":
-            response = api.get(endpoint)
+            response = api.get(endpoint, cursor=cursor)
+
+        if paginator is not None:
+            if paginator in response:
+                next_cursor = response[paginator]
 
         # FUTURE: Fix - Add data_selector Logic
-        if data_selector:
-            data = response.get(data_selector, None) 
+        if data_selector is not None:
+            keys = data_selector.lstrip("$.").split(".")
+            data = response
+            for key in keys:
+                data = data.get(key, {})
         else:                            
             data = response
 
-        return data
+        return data, next_cursor
 
     def _handle_outgoing_api(self, method: OutputAPIMethod, connections, data):
         """
@@ -499,6 +511,7 @@ class Reagent(Residue):
                 try:
                     input_data = {} 
                     input_final = {}
+                    input_cursors = {}
                     input_batch_methods = {}
                     input_data_ack_msgs = [] 
                     
@@ -536,14 +549,27 @@ class Reagent(Residue):
                             elif method_type == "api":
                                 self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using API retrieval strategy", endpoint=method.endpoint, api_method=method.http_method) 
                                 input_batch_methods[input_name] = "api"
-                                data = self._handle_incoming_api(method, connections_dict)
+                                cursor = checkpoint_metadata.batch_cursors.get(input_name) if checkpoint_metadata.batch_cursors else None
+                                data, cursor = self._handle_incoming_api(method, connections_dict, cursor)
+                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+                                print(f"Data Fetched for Input {input_name}:", data)
+                                print(f"Cursor for Input {input_name}:", cursor)
+                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
                                 input_data[input_name] = data
-                                input_final[input_name] = True # THIS IS UNTIL WE IMPLEMENT A CURSOR / PAGINATION
+                                if cursor is None:
+                                    input_final[input_name] = True # THIS IS UNTIL WE IMPLEMENT A CURSOR / PAGINATION
+                                    input_cursors[input_name] = None
+                                else:
+                                    input_final[input_name] = False
+                                    input_cursors[input_name] = cursor
                                 break
                             else:
                                 self.residue(self.ash.WARNING, f"Unknown retrieval method type: {method_type} for input dependency {input_name}. Skipping this method.")
                                 raise ValueError(f"Unknown retrieval method type: {method_type}")
-                        oxidizer_task = self._update_checkpoint_metadata(oxidizer_task, input_final, input_batch_methods)
+                        oxidizer_task = self._update_checkpoint_metadata(oxidizer_task, input_final, input_batch_methods, input_cursors)
                 except Exception as e:
                     self.residue(self.ash.CRITICAL, "Error occurred during fetching of input data for the task, such as reading from input streams, executing SQL queries, or making API calls based on the retrieval strategies defined for the inputs in the task message", error=str(e), task=task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id)           
                     error_details = ErrorDetails(
@@ -669,9 +695,15 @@ class Reagent(Residue):
             return wrapper
 
         def auto_run_decorator(func):
-            wrapped = decorator(func)
-            wrapped()
-            return wrapped
+            if self.auto_react:
+                while True:
+                    wrapped = decorator(func)
+                    wrapped()
+                    return wrapped
+            else: 
+                wrapped = decorator(func)
+                wrapped()
+                return wrapped
 
         return auto_run_decorator
 
