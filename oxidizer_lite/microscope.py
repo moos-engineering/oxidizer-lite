@@ -26,7 +26,7 @@ class Microscope(Residue):
             crucible (Crucible): The S3 client for object storage operations.
             enable_anvil (bool): Whether to enable the Anvil SQL/API engine endpoints.
         """
-        super().__init__()
+        super().__init__(component_name="microscope")
         self.catalyst = catalyst
         self.crucible = crucible
         self.invocation_stream = "oxidizer:streams:invocations" # This is the stream that the API layer will write invocation messages to for the controller to read from.

@@ -64,19 +64,13 @@ class Topology(Residue):
     Represents the DAG topology of nodes and their dependencies.
     """
     def __init__(self): 
-        """Initializes the Topology with empty node, edge, status, and results registries."""
+        """Initializes the Topology DAG builder."""
         super().__init__(component_name="topology")
-
-        self.nodes: Dict[str, dict] = {}       # "config.layer.table" -> table config
-        self.edges: Dict[str, List[str]] = defaultdict(list)  # parent -> [children]
-        self.reverse_edges: Dict[str, List[str]] = defaultdict(list)  # child -> [parents]
-        self.status: Dict[str, NodeStatus] = {}  # "config.layer.table" -> NodeStatus
-        self.results: Dict[str, str] = {}  # "config.layer.table" -> output artifact path
     
 
-    def dag(self, config: dict):
+    def dag(self, config: dict) -> dict:
         """
-        Updates the DAG structure based on the lattice configuration.
+        Builds and returns a fresh DAG structure from the lattice configuration.
 
         Args:
             config (dict): The topology configuration dictionary loaded from the lattice configuration file, including layers, nodes, and their dependencies.
@@ -86,6 +80,11 @@ class Topology(Residue):
         """
         #0 - Config Details 
         layers = config.get("layers", [])
+
+        nodes: Dict[str, dict] = {}
+        edges: Dict[str, List[str]] = defaultdict(list)
+        reverse_edges: Dict[str, List[str]] = defaultdict(list)
+        status: Dict[str, NodeStatus] = {}
 
         #1 - Register Nodes  
         base_checkpoint_metadata = CheckpointMetadata(
@@ -107,15 +106,15 @@ class Topology(Residue):
             for node in layer.get("nodes", []):
                 node_id = f"{layer_name}.{node.get('name')}" 
                 self.residue(self.ash.DEBUG, f"TOPOLOGY: Registering node '{node_id}' with initial checkpoint metadata: {base_checkpoint_metadata.to_dict()}.")
-                self.nodes[node_id] = node
-                self.nodes[node_id]["layer"] = layer_name
-                self.nodes[node_id]["checkpoint_metadata"] = base_checkpoint_metadata.to_dict()
+                nodes[node_id] = node
+                nodes[node_id]["layer"] = layer_name
+                nodes[node_id]["checkpoint_metadata"] = base_checkpoint_metadata.to_dict()
                 node_type = node.get("type", None)
                 if node_type == "scheduled":
-                    self.status[node_id] = NodeStatus.SCHEDULED  
+                    status[node_id] = NodeStatus.SCHEDULED  
                     self.residue(self.ash.DEBUG, f"TOPOLOGY: Registered scheduled node '{node_id}' with initial status SCHEDULED.")
                 else:
-                    self.status[node_id] = NodeStatus.PENDING 
+                    status[node_id] = NodeStatus.PENDING 
                     self.residue(self.ash.DEBUG, f"TOPOLOGY: Registered node '{node_id}' with initial status PENDING.")
 
         #2 - Register Edges
@@ -129,16 +128,15 @@ class Topology(Residue):
                     ref = source.get("ref")
                     if ref:
                         # Edge: ref (parent) -> node_id (child)
-                        self.edges[ref].append(node_id)
-                        self.reverse_edges[node_id].append(ref)
+                        edges[ref].append(node_id)
+                        reverse_edges[node_id].append(ref)
                         self.residue(self.ash.DEBUG, f"TOPOLOGY: Registered edge from '{ref}' to '{node_id}'.")
 
-        topology = { 
-            "nodes": self.nodes,
-            "edges": self.edges,
-            "reverse_edges": self.reverse_edges,
-            "status": self.status
+        return { 
+            "nodes": nodes,
+            "edges": dict(edges),
+            "reverse_edges": dict(reverse_edges),
+            "status": status
         }
-        return topology
 
         

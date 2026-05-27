@@ -33,15 +33,16 @@ class Lattice(Residue):
         self.residue(self.ash.DEBUG, f"LATTICE: Loaded configuration {object_key} from bucket '{bucket_name}' with key '{object_key}'.")
         return self.config
 
-    def save_config(self, bucket_name, object_key):
+    def save_config(self, bucket_name, object_key, config):
         """
         Saves the current configuration to S3 using Crucible.
         
         Args:
             bucket_name (str): The name of the S3 bucket to save the configuration to.
             object_key (str): The S3 object key for the configuration file.
+            config (dict): The configuration to save.
         """
-        config_data = yaml.dump(self.config)
+        config_data = yaml.dump(config)
         self.crucible.put_object(bucket_name, object_key, config_data)
         self.residue(self.ash.DEBUG, f"LATTICE: Saved configuration {object_key} to bucket '{bucket_name}' with key '{object_key}'.")
 

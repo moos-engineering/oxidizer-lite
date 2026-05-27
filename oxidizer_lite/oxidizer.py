@@ -1,6 +1,7 @@
 # CONTROLLER
 
 from datetime import datetime
+import socket
 import uuid
 import json
 
@@ -16,6 +17,37 @@ sample_invocation_payload = {
     "type": "invoke_topology",
     "lattice": "sample"
 }
+
+
+
+class OxidizerKeys:
+    # Streams
+    WORKER_STREAM        = "oxidizer:streams:worker"
+    CONTROLLER_STREAM    = "oxidizer:streams:controller"
+    INVOCATION_STREAM    = "oxidizer:streams:invocations"
+
+    # Redis key prefixes
+    LATTICE_PREFIX       = "oxidizer:lattice"
+    TOPOLOGY_ACTIVE      = "oxidizer:topology:active"
+    TOPOLOGY_ARCHIVE     = "oxidizer:topology:archive"
+    INVOCATION_PREFIX    = "oxidizer:invocation"
+    LOGS_PREFIX          = "oxidizer:logs"
+    DATA_STREAM_PREFIX   = "oxidizer:data"
+
+    @staticmethod
+    def lattice(lattice_id): return f"oxidizer:lattice:{lattice_id}"
+
+    @staticmethod
+    def topology_active(lattice_id, run_id): return f"oxidizer:topology:active:{lattice_id}:{run_id}"
+
+    @staticmethod
+    def topology_archive(lattice_id, run_id): return f"oxidizer:topology:archive:{lattice_id}:{run_id}"
+
+    @staticmethod
+    def invocation(invoke_id): return f"oxidizer:invocation:{invoke_id}"
+
+    @staticmethod
+    def data_stream(node_id): return f"oxidizer:data:{node_id}"
 
 
 
@@ -47,19 +79,14 @@ class Oxidizer(Residue):
         # Oxidizer Running State
         self.running = True
 
-        # Oxidizer Lattice Cache Key
-        self.lattice_cache_key = "oxidizer:lattice" # + lattice_id -> "oxidizer:lattice:lattice_id" -> cached lattice configuration that the controller can read from and write to as it executes the topology. 
-
-        # Oxidizer Topology Run State Key Prefix
-        self.topology_run_state_prefix = "oxidizer:topology:active" # + lattice + run_id -> "oxidizer:topology:state:lattice:run_id" -> live dag representation of the topology with node statuses and results that the controller can read from and write to as they execute the topology. This allows for real-time updates and state management of the topology execution.
-        self.topology_archive_state_prefix = "oxidizer:topology:archive" # + lattice + run_id -> "oxidizer:topology:archive:lattice:run_id" -> archived state of the topology execution after completion for historical reference and debugging. This allows the controller to move completed topology states from the active namespace to the archive namespace in Catalyst to keep the active namespace clean and focused on currently running topologies, while still retaining access to historical execution data for troubleshooting and analysis.
-
-        # Oxidizer Streams and Consumer Group Names
+        # Oxidizer Consumer Group Names
         self.oxidizer_consumer_group = "oxidizer-group" # This is the consumer group that the manager will use to read messages from the worker stream. Each worker should have its own consumer group to read from, but this ensures the stream exists before we start writing to it.
-        self.oxidizer_consumer_name = "controller" # This is the consumer name that the manager will use to read messages from the worker stream. Each worker should have its own consumer name to read from, but this ensures the stream exists before we start writing to it.
-        self.worker_stream = "oxidizer:streams:worker"
-        self.controller_stream = "oxidizer:streams:controller"
-        self.invocation_stream = "oxidizer:streams:invocations"
+        self.oxidizer_consumer_name = "controller-"  + socket.gethostname() + "-" + str(uuid.uuid4())  # This is the consumer name that the manager will use to read messages from the worker stream. Each worker should have its own consumer name to read from, but this ensures the stream exists before we start writing to it.
+        
+        # Oxidizer Streams
+        self.worker_stream = OxidizerKeys.WORKER_STREAM # "oxidizer:streams:worker" # This is the stream that the controller will write messages to for the workers to read from. Each worker should have its own consumer group and consumer name to read from this stream, but this ensures the stream exists before we start writing to it.
+        self.controller_stream = OxidizerKeys.CONTROLLER_STREAM # "oxidizer:streams:controller" # This is the stream that the controller will read messages from that the workers write to. Each worker should write messages to this stream for the controller to read and process updates on topology execution.
+        self.invocation_stream = OxidizerKeys.INVOCATION_STREAM # "oxidizer:streams:invocations" # This is the stream that the controller will read invocation messages from the API layer.
 
 
         # self.crucible_bucket = "oxidizer-test"
@@ -121,7 +148,8 @@ class Oxidizer(Residue):
             lattice_id (str): The identifier of the lattice configuration (e.g., "sample").
             config (dict): The lattice configuration to cache.
         """
-        key = f"{self.lattice_cache_key}:{lattice_id}" # Use lattice name as part of the cache key to allow caching multiple lattice configurations if needed. This way, if the same lattice configuration is used for multiple invocations, it can be quickly retrieved from the cache without having to read from S3 each time, reducing latency and S3 read costs.
+        key = OxidizerKeys.lattice(lattice_id) # Use lattice name as part of the cache key to allow caching multiple lattice configurations if needed. This way, if the same lattice configuration is used for multiple invocations, it can be quickly retrieved from the cache without having to read from S3 each time, reducing latency and S3 read costs.
+        # key = f"{self.lattice_cache_key}:{lattice_id}" # Use lattice name as part of the cache key to allow caching multiple lattice configurations if needed. This way, if the same lattice configuration is used for multiple invocations, it can be quickly retrieved from the cache without having to read from S3 each time, reducing latency and S3 read costs.
         try:
             self.catalyst.set_json(key, config) # Cache the lattice configuration in Catalyst so that it can be quickly retrieved for topology generation without having to read from S3 each time. This is especially beneficial if the same lattice configuration is used for multiple invocations, as it reduces latency and S3 read costs by avoiding repeated reads of the same lattice config from S3 for each invocation. The cache can have a TTL set to ensure it doesn't grow indefinitely and stale data is eventually cleared out.
         except (ResponseError, RedisConnectionError) as e:
@@ -137,7 +165,7 @@ class Oxidizer(Residue):
         Returns:
             dict | None: The cached lattice configuration, or None if not found in the cache.
         """
-        key = f"{self.lattice_cache_key}:{lattice_id}"
+        key = OxidizerKeys.lattice(lattice_id)
         try:
             config = self.catalyst.get_json(key)
             return config
@@ -168,7 +196,7 @@ class Oxidizer(Residue):
             state (dict): The topology execution state to cache.
         """
         state = json.loads(json.dumps(state, cls=EnumEncoder)) # Serialize the topology state to JSON format using the custom EnumEncoder to handle any Enum values in the state. This allows us to store complex data structures that may include Enums in the Catalyst state store as JSON strings, and then deserialize them back into their original form when reading from the state store. This is important for maintaining the integrity of the topology state, especially if it includes node statuses that are represented as Enums.
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id) # Use lattice name and run ID as part of the cache key to allow caching multiple topology execution states for different runs and lattice configurations. This way, the controller can manage the state of multiple concurrent topology executions without conflicts in the cache, and can easily retrieve the state for a specific topology execution using its lattice ID and run ID.
         try:
             self.catalyst.set_json(key, state) # Cache the topology execution state in Catalyst so that it can be updated in real-time as worker updates come in and the controller can read the latest state to make decisions on which nodes to dispatch next based on their dependencies and statuses. This allows for stateful execution of the topology and real-time tracking of node statuses and results.
         except (ResponseError, RedisConnectionError) as e:
@@ -185,7 +213,7 @@ class Oxidizer(Residue):
         Returns:
             dict | None: The cached topology execution state, or None if not found in the cache.
         """
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id)
         self.residue(self.ash.DEBUG, "Topology state key", key=key)
         try:
             state = self.catalyst.get_json(key)
@@ -202,7 +230,7 @@ class Oxidizer(Residue):
             lattice_id (str): The identifier of the lattice configuration (e.g., "sample").
             run_id (str): The identifier of the topology run (e.g., "run_1").
         """
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id)
         try:
             self.catalyst.update_json(key, '.started_timestamp', datetime.utcnow().isoformat()) # Mark the topology execution with a started timestamp in the cached topology state in Catalyst. This allows for tracking when the topology execution started and can be useful for historical reference, debugging, and analysis of execution times and performance.
         except (ResponseError, RedisConnectionError) as e:
@@ -216,7 +244,7 @@ class Oxidizer(Residue):
             lattice_id (str): The identifier of the lattice configuration (e.g., "sample").
             run_id (str): The identifier of the topology run (e.g., "run_1").
         """
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id)
         try:
             self.catalyst.update_json(key, '.completed_timestamp', datetime.utcnow().isoformat()) # Mark the topology execution with a completed timestamp in the cached topology state in Catalyst. This allows for tracking when the topology execution finished and can be useful for historical reference, debugging, and analysis of execution times and performance.
         except (ResponseError, RedisConnectionError) as e:
@@ -232,7 +260,7 @@ class Oxidizer(Residue):
         Returns:
             list | None: The connections of the lattice, or None if not found in the cache.
         """
-        key = f"{self.lattice_cache_key}:{lattice_id}"
+        key = OxidizerKeys.lattice(lattice_id) # Use lattice name as part of the cache key to retrieve the cached lattice configuration from Catalyst. This allows the controller to access the lattice configuration, including its connections (edges), which are needed for topology generation and execution.
         try:
             connections = self.catalyst.get_json(key, path=".connections")
             return connections
@@ -304,7 +332,7 @@ class Oxidizer(Residue):
             node_id (str): The identifier of the node to update (e.g., "layer.node").
             status (NodeStatus): The new status to set for the node (e.g., NodeStatus.SUCCESS).
         """
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id)
         # xx = ["status: user.name"]
         # Use bracket notation for node_id to handle dots in key names
         try:
@@ -323,7 +351,7 @@ class Oxidizer(Residue):
             node_id (str): The identifier of the node to update (e.g., "layer.node").
             worker_msg (TaskMessage): The worker message containing checkpoint metadata and optional error details.
         """
-        key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
+        key = OxidizerKeys.topology_active(lattice_id, run_id)
         checkpoint_metadata = worker_msg.node_configuration.checkpoint_metadata.to_dict()
         try:
             self.catalyst.update_json(key, f'.nodes["{node_id}"].checkpoint_metadata', checkpoint_metadata) # Update the checkpoint metadata of a node in the cached topology state in Catalyst. This allows the controller to keep track of the progress of long-running nodes that process data in batches and require checkpointing to manage their state between batches. The checkpoint metadata can include information such as the last processed cursor, batch index, number of records processed, total records processed so far, and whether the checkpoint is final, which can help the controller make informed decisions on when to dispatch the next batch of work to the worker based on the progress of the current batch and the overall status of the node.
@@ -343,8 +371,8 @@ class Oxidizer(Residue):
             lattice_id (str): The identifier of the lattice configuration (e.g., "sample").
             run_id (str): The identifier of the topology run (e.g., "run_1").
         """
-        active_key = f"{self.topology_run_state_prefix}:{lattice_id}:{run_id}"
-        archive_key = f"{self.topology_archive_state_prefix}:{lattice_id}:{run_id}"
+        active_key = OxidizerKeys.topology_active(lattice_id, run_id)
+        archive_key = OxidizerKeys.topology_archive(lattice_id, run_id)
         try:
             self.catalyst.rename_key(active_key, archive_key)
         except (ResponseError, RedisConnectionError) as e:
@@ -368,261 +396,268 @@ class Oxidizer(Residue):
         return all(status in [NodeStatus.SUCCESS.value, NodeStatus.SKIPPED.value] for status in state["status"].values()) # The topology is considered complete when all nodes have a status of either SUCCESS or SKIPPED. This means that all nodes have either completed successfully or were skipped due to upstream failures, and there are no nodes left in a pending or running state. This is a simple way to determine if the entire topology execution has finished and the controller can perform any necessary cleanup or archival of the topology state.
 
 
+    
+    def process_invocations(self):
+        try:
+            invocations = self.catalyst.read_from_stream(self.invocation_stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name, count=1) # Read invocation messages from the invocation stream to get new jobs or commands for the controller to execute. This is how the API layer can communicate with the controller to trigger new topology executions or send control commands like shutdown signals. Each message should contain the necessary information for the controller to process the command, such as the type of command (e.g., invoke_topology, shutdown), and any relevant data (e.g., lattice configuration name for invoking a topology).
+        except ResponseError as e:
+            if "NOGROUP" in str(e):
+                self.residue(self.ash.WARNING, "Consumer group missing, recreating...", stream=self.invocation_stream)
+                self.catalyst.create_consumer_group(self.invocation_stream, self.oxidizer_consumer_group)
+            else: 
+                self.residue(self.ash.ERROR, "Error reading from invocation stream", error=str(e))
+        if invocations:
+            msg_id, invocation = invocations[0] 
+            self.residue(self.ash.INFO, "Received INVOCATION", invocation=invocation)
+
+            invoke_id = invocation["invoke_id"]                
+            run_id = uuid.uuid4() # Generate a unique run ID for this invocation to track the topology execution state in Catalyst.
+
+
+            # IF / ELSE LOGIC BASED ON INVOCATION TYPE (NEW JOB, SHUTDOWN SIGNAL, ETC.)
+            # FOR NEW JOB: LOAD LATTICE CONFIG, GENERATE TOPOLOGY, DISPATCH INITIAL NODES TO WORKERS, ETC.
+            if invocation['type'] == 'invoke_topology':  
+                lattice_id = invocation['lattice']
+
+                # Check if Lattice Exists in Cache
+                lattice = self.get_cached_lattice(lattice_id) # Check Cache First
+                
+
+                # If Lattice is not in Cache, Load from S3 and Cache Lattice Configuration
+                load_lattice_error = None
+                if not lattice: 
+                    lattice = self.load_lattice(lattice_id)
+                    if lattice:
+                        self.cache_lattice(lattice_id, lattice) # Cache So We Dont Have to Keep Reading. TTL Should be set and then it should check first and then load and then cache
+                    else:
+                        load_lattice_error = "Failed to load lattice configuration from S3"
+                
+                # Validate Lattice Configuration Before Generating Topology
+                # FUTURE - This needs updating - Move into the above?
+                # if not self.validate_lattice(lattice):
+                #     self.residue(self.ash.ERROR, "Invalid lattice configuration", lattice_id=lattice_id)
+                #     load_lattice_error = "Invalid lattice configuration"
+                #     continue # Skip processing this invocation and move on to the next one if the lattice configuration is invalid, since we can't proceed with an invalid lattice config.
+
+
+
+
+                # Add Invocation to Run State in Catalyst for Reference by Microscope API and Frontend
+                invocation_details = {
+                    "invoke_id": invoke_id,
+                    "lattice_id": lattice_id,
+                    "run_id": f"{run_id}", 
+                    "invoke_error": load_lattice_error
+                }
+                # FUTURE: Fix - Make this a sub function in oxidizer ?
+                self.catalyst.set_json(f"oxidizer:invocation:{invoke_id}", invocation_details) 
+                self.catalyst.set_ttl(f"oxidizer:invocation:{invoke_id}", 60 * 15) 
+
+
+                # If Valid Invocation, Generate Topology and Cache Initial State in Catalyst for Controller to Manage During Execution
+                if not load_lattice_error:
+                # Generate Topology from Lattice Config 
+                    topology = self.generate_topology(lattice) 
+                    topology['lattice_id'] = lattice_id # Add lattice name to topology state for reference
+                    topology['run_id'] = f"{run_id}" # Add run ID to topology state for reference
+
+                    # CACHE TOPOLOGY STATE IN CATALYST FOR STATEFUL EXECUTION 
+                    self.cache_topology_state(lattice_id, run_id, topology)
+
+                
+
+            if invocation['type'] == 'pause_topology':
+                lattice_id = invocation['lattice_id'] # REQUIRED 
+                run_id = invocation['run_id'] # REQUIRED
+                node_id = invocation.get('node_id') # OPTIONAL - IF SPECIFIED, PAUSE FROM THIS NODE AND DOWNSTREAM NODES; IF NOT SPECIFIED, PAUSE ENTIRE TOPOLOGY
+                self.residue(self.ash.INFO, "Received PAUSE TOPOLOGY signal. Pausing topology execution gracefully after current batch completes.", lattice_id=lattice_id, run_id=run_id)
+                # FUTURE IMPLEMENTATION: UPDATE TOPOLOGY STATE IN CATALYST TO REFLECT PAUSED STATUS, AND WORKERS CHECK THIS STATUS BEFORE DISPATCHING NEW BATCHES TO KNOW WHETHER TO PAUSE OR NOT.
+
+            if invocation['type'] == 'resume_topology':
+                lattice_id = invocation['lattice_id'] # REQUIRED 
+                run_id = invocation['run_id'] # REQUIRED
+                node_id = invocation.get('node_id') # OPTIONAL - IF SPECIFIED, RESUME FROM THIS NODE AND DOWNSTREAM NODES; IF NOT SPECIFIED, RESUME ENTIRE TOPOLOGY
+                self.residue(self.ash.INFO, "Received RESUME TOPOLOGY signal. Resuming topology execution.", lattice_id=lattice_id, run_id=run_id)
+                # FUTURE IMPLEMENTATION: UPDATE TOPOLOGY STATE IN CATALYST TO REFLECT RESUMED STATUS, AND WORKERS CHECK THIS STATUS BEFORE DISPATCHING NEW BATCHES TO KNOW WHETHER TO RESUME OR NOT.
+
+
+            if invocation['type'] == 'shutdown':
+                self.residue(self.ash.INFO, "Received shutdown signal. Shutting down Oxidizer gracefully after completing current jobs.")
+                self.running = False
+        
+        else:
+            self.residue(self.ash.INFO, "No messages in INVOCATION stream. Waiting...")
+        return 
+    
+    def process_worker_updates(self):
+        try:
+            worker_updates = self.catalyst.read_from_stream(self.controller_stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name)
+        except ResponseError as e:
+            if "NOGROUP" in str(e):
+                self.residue(self.ash.WARNING, "Consumer group missing, recreating...", stream=self.controller_stream)
+                self.catalyst.create_consumer_group(self.controller_stream, self.oxidizer_consumer_group)
+            else: 
+                self.residue(self.ash.ERROR, "Error reading from controller stream", error=str(e))
+        
+        if worker_updates:
+
+            # Message ID and Worker Update Details
+            msg_id, worker_update = worker_updates[0]
+            worker_msg = TaskMessage.from_dict(worker_update)
+
+            # Lattice ID, Run ID, Node ID from Worker Update for Reference and State Management in Catalyst
+            worker_update_type = worker_msg.type
+            lattice_id = worker_msg.lattice_id
+            run_id = worker_msg.run_id
+            layer_id = worker_msg.layer_id
+            node_id = worker_msg.node_id
+            node_configuration = worker_msg.node_configuration
+
+            # Lattice Connections for Reference in Processing Worker Update and Making Decisions on Next Nodes to Dispatch
+            connections = self.get_lattice_connections(lattice_id) # Get the connections of the lattice from the cached lattice configuration in Catalyst. This allows the controller to understand the dependencies between nodes in the topology and make informed decisions on which nodes to dispatch next based on the current state of execution and which dependencies have been met.
+            
+            # Log Received Worker Update for Debugging and Transparency
+            self.residue(self.ash.INFO, "Received WORKER UPDATE", worker_update=worker_update, lattice_id=lattice_id, run_id=worker_msg.run_id, node_id=worker_msg.node_id)
+
+            # FUTURE - Fix - Is this even needed? Does the above Task message have everything?
+            # Prep Node + Task Message Details for Processing Worker Update
+            worker_msg = TaskMessage(
+                type=worker_msg.type,
+                lattice_id=worker_msg.lattice_id,
+                run_id=worker_msg.run_id,
+                layer_id=worker_msg.layer_id,
+                node_id=worker_msg.node_id,
+                node_configuration=worker_msg.node_configuration,
+                connections=connections
+            )
+
+            # Process Worker Update Based on Its Message Type (E.G. STARTED, CHECKPOINT, SUCCESS, FAILED, HEARTBEAT, PAUSE_ACK, RESUME_ACK)
+            if worker_msg.type == WorkerMessageType.STARTED.value: 
+                # get node_configuration and see if LIVE node...
+                node_type = node_configuration.type
+                if node_type == "live":
+                    self.mark_topology_started_timestamp(lattice_id, run_id) # Mark the topology execution with a started timestamp in the cached topology state in Catalyst when the first worker reports that it has started processing a node. This allows for tracking when the topology execution started and can be useful for historical reference, debugging, and analysis of execution times and performance.
+                    self.update_node_status(lattice_id, run_id, node_id, NodeStatus.LIVE)
+                    self.residue(self.ash.INFO, "Updated node status to LIVE", lattice_id=lattice_id, run_id=run_id, node_id=node_id) 
+                else:
+                    self.mark_topology_started_timestamp(lattice_id, run_id) # Mark the topology execution with a started timestamp in the cached topology state in Catalyst when the first worker reports that it has started processing a node. This allows for tracking when the topology execution started and can be useful for historical reference, debugging, and analysis of execution times and performance.
+                    self.update_node_status(lattice_id, run_id, node_id, NodeStatus.RUNNING)
+                    self.residue(self.ash.INFO, "Updated node status to RUNNING", lattice_id=lattice_id, run_id=run_id, node_id=node_id) 
+
+            elif worker_msg.type == WorkerMessageType.CHECKPOINT.value:
+                if worker_msg.node_configuration.checkpoint_metadata.is_final and worker_msg.node_configuration.type != "live":
+                    self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg)
+                    self.update_node_status(lattice_id, run_id, node_id, NodeStatus.SUCCESS)
+                    self.residue(self.ash.INFO, "Updated node status to SUCCESS", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+                else:
+                    worker_msg.node_configuration.checkpoint_metadata.batch_index += 1 
+                    self.residue(self.ash.INFO, "Updated node checkpoint metadata in topology state", lattice_id=lattice_id, run_id=run_id, node_id=node_id, checkpoint_metadata=worker_msg.node_configuration.checkpoint_metadata)
+                    # Write Checkpoint Task Message to Worker Stream
+                    worker_msg.type = WorkerTaskType.CHECKPOINT_NODE.value
+                    try:
+                        self.catalyst.write_to_stream(self.worker_stream, worker_msg.to_dict()) # Write a checkpoint task message to the worker stream to acknowledge the checkpoint and provide any updated checkpoint metadata. This allows the worker to know that the checkpoint was received and processed by the controller, and it can use the updated checkpoint metadata to manage its state for the next batch of work. The controller can also use this opportunity to update the node status in the topology state in Catalyst if needed (e.g., if the checkpoint indicates that the node is still running but has made progress, we can keep it as RUNNING, but if the checkpoint indicates that the node has completed its work, we can update it to SUCCESS).
+                    except (ResponseError, RedisConnectionError) as e:
+                        self.residue(self.ash.WARNING, "Failed to write checkpoint to worker stream", error=str(e), lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+                    
+                    self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg) 
+                    self.update_node_status(lattice_id, run_id, node_id, NodeStatus.DISPATCHED)
+                    self.residue(self.ash.INFO, "Updated node status to DISPATCHED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+            
+            # elif worker_msg.type == WorkerMessageType.SUCCESS.value:
+            #     # This should never happend - checkpoint w/ is_final=true should be the only way for a node to report success 
+            #     pass
+            
+            elif worker_msg.type == WorkerMessageType.FAILED.value:
+                # Handle failed acknowledgment - update node status to FAILED and record error details for debugging and potential retries
+                self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg)
+                # FUTURE - Add Retry Logic Here Based on Error Details and Retry Policies (E.G. MAX RETRIES, BACKOFF STRATEGIES, ETC.)
+                self.update_node_status(lattice_id, run_id, node_id, NodeStatus.FAILED)
+                self.residue(self.ash.INFO, "Updated node status to FAILED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+            
+            elif worker_msg.type == WorkerMessageType.HEARTBEAT.value:
+                # Handle heartbeat - update last seen timestamp for worker to monitor liveness and reset any dispatch timeouts
+                pass
+            
+            # elif worker_msg.type == WorkerMessageType.PAUSE_ACK.value:
+            #     # Handle pause acknowledgment - update node status to PAUSED and ensure worker has committed any in-flight work before halting
+            #     pass
+            
+            # elif worker_msg.type == WorkerMessageType.RESUME_ACK.value:
+            #     # Handle resume acknowledgment - update node status to RUNNING and ensure worker has resumed processing from the correct cursor
+            #     pass
+        else:
+            self.residue(self.ash.INFO, "No messages in CONTROLLER stream. Waiting...")
+        return
+    
+    def process_active_topologies(self):
+        self.residue(self.ash.DEBUG, "Checking for nodes ready to dispatch...")
+        try:
+            key = OxidizerKeys.topology_active("*", "*") # Use wildcard pattern to scan for all active topology states in Catalyst. This allows the controller to manage multiple concurrent topology executions and check the state of each one to determine which nodes are ready to be dispatched to workers based on their dependencies and statuses.
+            active_topologies = self.catalyst.scan_keys(key)
+        except (ResponseError, RedisConnectionError) as e:
+            self.residue(self.ash.WARNING, "Failed to scan for active topologies", error=str(e))
+            active_topologies = []
+        for topology_key in active_topologies:
+            self.residue(self.ash.INFO, "Active topology", topology_key=topology_key)
+            
+            lattice_id = topology_key.split(":")[-2] # Assuming the key format is "oxidizer:topology:active:lattice_id:run_id"
+            connections = self.get_lattice_connections(lattice_id)
+            
+            run_id = topology_key.split(":")[-1]
+            
+            topology_state = self.get_cached_topology_state(lattice_id, run_id)
+            if not topology_state:
+                self.residue(self.ash.WARNING, "Topology state missing, skipping", lattice_id=lattice_id, run_id=run_id)
+                continue
+            nodes = topology_state["nodes"]
+            statuses = topology_state["status"]
+            # iterate through each status and check if node is pending and if dependencies are met, then dispatch to worker stream and update status to running
+            for node_id, status in statuses.items():
+                if status == NodeStatus.PENDING.value and self.check_node_dependencies(lattice_id, run_id, node_id):
+                    # Dispatch to worker stream
+
+                    node_details = nodes[node_id]
+                    node_layer = node_details["layer"]
+
+                    task_msg = TaskMessage(
+                        type=WorkerTaskType.START_NODE.value,
+                        lattice_id=lattice_id,
+                        connections=connections, 
+                        run_id=run_id,
+                        layer_id=node_layer,
+                        node_id=node_id,
+                        node_configuration=NodeConfiguration(**node_details).to_dict()
+                    )
+                    try:
+                        self.catalyst.write_to_stream(self.worker_stream, task_msg.to_dict())
+                        self.residue(self.ash.INFO, "Dispatched node to worker stream", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+                        self.update_node_status(lattice_id, run_id, node_id, NodeStatus.DISPATCHED)
+                        self.residue(self.ash.INFO, "Updated node status to DISPATCHED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
+                    except (ResponseError, RedisConnectionError) as e:
+                        self.residue(self.ash.WARNING, "Failed to dispatch node to worker stream", error=str(e), lattice_id=lattice_id, run_id=run_id, node_id=node_id)   
+            
+            # Check if All Nodes Are Complete and Archive Topology State if So
+            self.residue(self.ash.DEBUG, "Checking if topology execution is complete...", lattice_id=lattice_id, run_id=run_id)
+            if self.topology_complete(lattice_id, run_id):
+                self.residue(self.ash.INFO, "Topology execution complete. Archiving topology state.", lattice_id=lattice_id, run_id=run_id)
+                # Add Completion Timestamp to Topology State Before Archiving
+                self.mark_topology_completed_timestamp(lattice_id, run_id)
+                self.archive_topology_state(lattice_id, run_id)
+        return
+    
     def oxidize(self):
         """
         Main loop for the Oxidizer controller to read invocation messages, manage topology state, and process worker updates.
         """
         while self.running: # FUTURE REPLACE WITH SHUTDOWN SIGNAL HANDLER VIA INVOCATION STREAM (WAIT FOR ALL JOBS TO FINISH)
-            lattice_id = None
-            run_id = None
 
             # 1 - Read from Invocation Stream for New Jobs or Commands
-            try:
-                invocations = self.catalyst.read_from_stream(self.invocation_stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name, count=1) # Read invocation messages from the invocation stream to get new jobs or commands for the controller to execute. This is how the API layer can communicate with the controller to trigger new topology executions or send control commands like shutdown signals. Each message should contain the necessary information for the controller to process the command, such as the type of command (e.g., invoke_topology, shutdown), and any relevant data (e.g., lattice configuration name for invoking a topology).
-            except ResponseError as e:
-                if "NOGROUP" in str(e):
-                    self.residue(self.ash.WARNING, "Consumer group missing, recreating...", stream=self.invocation_stream)
-                    self.catalyst.create_consumer_group(self.invocation_stream, self.oxidizer_consumer_group)
-                    continue
-                else: 
-                    self.residue(self.ash.ERROR, "Error reading from invocation stream", error=str(e))
-                    continue
-            if invocations:
-                msg_id, invocation = invocations[0] 
-                self.residue(self.ash.INFO, "Received INVOCATION", invocation=invocation)
-
-                invoke_id = invocation["invoke_id"]                
-                run_id = uuid.uuid4() # Generate a unique run ID for this invocation to track the topology execution state in Catalyst.
-
-
-                # IF / ELSE LOGIC BASED ON INVOCATION TYPE (NEW JOB, SHUTDOWN SIGNAL, ETC.)
-                # FOR NEW JOB: LOAD LATTICE CONFIG, GENERATE TOPOLOGY, DISPATCH INITIAL NODES TO WORKERS, ETC.
-                if invocation['type'] == 'invoke_topology':  
-                    lattice_id = invocation['lattice']
-
-                    # Check if Lattice Exists in Cache
-                    lattice = self.get_cached_lattice(lattice_id) # Check Cache First
-                    
-
-                    # If Lattice is not in Cache, Load from S3 and Cache Lattice Configuration
-                    load_lattice_error = None
-                    if not lattice: 
-                        lattice = self.load_lattice(lattice_id)
-                        if lattice:
-                            self.cache_lattice(lattice_id, lattice) # Cache So We Dont Have to Keep Reading. TTL Should be set and then it should check first and then load and then cache
-                        else:
-                            load_lattice_error = "Failed to load lattice configuration from S3"
-                    
-                    # Validate Lattice Configuration Before Generating Topology
-                    # FUTURE - This needs updating - Move into the above?
-                    # if not self.validate_lattice(lattice):
-                    #     self.residue(self.ash.ERROR, "Invalid lattice configuration", lattice_id=lattice_id)
-                    #     load_lattice_error = "Invalid lattice configuration"
-                    #     continue # Skip processing this invocation and move on to the next one if the lattice configuration is invalid, since we can't proceed with an invalid lattice config.
-
-
-
-
-                    # Add Invocation to Run State in Catalyst for Reference by Microscope API and Frontend
-                    invocation_details = {
-                        "invoke_id": invoke_id,
-                        "lattice_id": lattice_id,
-                        "run_id": f"{run_id}", 
-                        "invoke_error": load_lattice_error
-                    }
-                    # FUTURE: Fix - Make this a sub function in oxidizer ?
-                    self.catalyst.set_json(f"oxidizer:invocation:{invoke_id}", invocation_details) 
-                    self.catalyst.set_ttl(f"oxidizer:invocation:{invoke_id}", 60 * 15) 
-
-
-                    # If Valid Invocation, Generate Topology and Cache Initial State in Catalyst for Controller to Manage During Execution
-                    if not load_lattice_error:
-                    # Generate Topology from Lattice Config 
-                        topology = self.generate_topology(lattice) 
-                        topology['lattice_id'] = lattice_id # Add lattice name to topology state for reference
-                        topology['run_id'] = f"{run_id}" # Add run ID to topology state for reference
-
-                        # CACHE TOPOLOGY STATE IN CATALYST FOR STATEFUL EXECUTION 
-                        self.cache_topology_state(lattice_id, run_id, topology)
-
-                    
-
-                if invocation['type'] == 'pause_topology':
-                    lattice_id = invocation['lattice_id'] # REQUIRED 
-                    run_id = invocation['run_id'] # REQUIRED
-                    node_id = invocation.get('node_id') # OPTIONAL - IF SPECIFIED, PAUSE FROM THIS NODE AND DOWNSTREAM NODES; IF NOT SPECIFIED, PAUSE ENTIRE TOPOLOGY
-                    self.residue(self.ash.INFO, "Received PAUSE TOPOLOGY signal. Pausing topology execution gracefully after current batch completes.", lattice_id=lattice_id, run_id=run_id)
-                    # FUTURE IMPLEMENTATION: UPDATE TOPOLOGY STATE IN CATALYST TO REFLECT PAUSED STATUS, AND WORKERS CHECK THIS STATUS BEFORE DISPATCHING NEW BATCHES TO KNOW WHETHER TO PAUSE OR NOT.
-
-                if invocation['type'] == 'resume_topology':
-                    lattice_id = invocation['lattice_id'] # REQUIRED 
-                    run_id = invocation['run_id'] # REQUIRED
-                    node_id = invocation.get('node_id') # OPTIONAL - IF SPECIFIED, RESUME FROM THIS NODE AND DOWNSTREAM NODES; IF NOT SPECIFIED, RESUME ENTIRE TOPOLOGY
-                    self.residue(self.ash.INFO, "Received RESUME TOPOLOGY signal. Resuming topology execution.", lattice_id=lattice_id, run_id=run_id)
-                    # FUTURE IMPLEMENTATION: UPDATE TOPOLOGY STATE IN CATALYST TO REFLECT RESUMED STATUS, AND WORKERS CHECK THIS STATUS BEFORE DISPATCHING NEW BATCHES TO KNOW WHETHER TO RESUME OR NOT.
-
-
-                if invocation['type'] == 'shutdown':
-                    self.residue(self.ash.INFO, "Received shutdown signal. Shutting down Oxidizer gracefully after completing current jobs.")
-                    self.running = False
-            
-            else:
-                self.residue(self.ash.INFO, "No messages in INVOCATION stream. Waiting...")
-
-
+            self.process_invocations()
 
 
             # 2 - Read from Controller Stream for Worker Updates (WorkerMessageType) - UPDATE TOPOLOGY STATE IN CATALYST BASED ON WORKER UPDATE (E.G. NODE STATUS CHANGES, RESULTS, ETC.)
-            try:
-                worker_updates = self.catalyst.read_from_stream(self.controller_stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name)
-            except ResponseError as e:
-                if "NOGROUP" in str(e):
-                    self.residue(self.ash.WARNING, "Consumer group missing, recreating...", stream=self.controller_stream)
-                    self.catalyst.create_consumer_group(self.controller_stream, self.oxidizer_consumer_group)
-                    continue
-                else: 
-                    self.residue(self.ash.ERROR, "Error reading from controller stream", error=str(e))
-                    continue
+            self.process_worker_updates()
+
             
-            if worker_updates:
-
-                # Message ID and Worker Update Details
-                msg_id, worker_update = worker_updates[0]
-                worker_msg = TaskMessage.from_dict(worker_update)
-
-                # Lattice ID, Run ID, Node ID from Worker Update for Reference and State Management in Catalyst
-                worker_update_type = worker_msg.type
-                lattice_id = worker_msg.lattice_id
-                run_id = worker_msg.run_id
-                layer_id = worker_msg.layer_id
-                node_id = worker_msg.node_id
-                node_configuration = worker_msg.node_configuration
-
-                # Lattice Connections for Reference in Processing Worker Update and Making Decisions on Next Nodes to Dispatch
-                connections = self.get_lattice_connections(lattice_id) # Get the connections of the lattice from the cached lattice configuration in Catalyst. This allows the controller to understand the dependencies between nodes in the topology and make informed decisions on which nodes to dispatch next based on the current state of execution and which dependencies have been met.
-                
-                # Log Received Worker Update for Debugging and Transparency
-                self.residue(self.ash.INFO, "Received WORKER UPDATE", worker_update=worker_update, lattice_id=lattice_id, run_id=worker_msg.run_id, node_id=worker_msg.node_id)
-
-                # FUTURE - Fix - Is this even needed? Does the above Task message have everything?
-                # Prep Node + Task Message Details for Processing Worker Update
-                worker_msg = TaskMessage(
-                    type=worker_msg.type,
-                    lattice_id=worker_msg.lattice_id,
-                    run_id=worker_msg.run_id,
-                    layer_id=worker_msg.layer_id,
-                    node_id=worker_msg.node_id,
-                    node_configuration=worker_msg.node_configuration,
-                    connections=connections
-                )
-
-                # Process Worker Update Based on Its Message Type (E.G. STARTED, CHECKPOINT, SUCCESS, FAILED, HEARTBEAT, PAUSE_ACK, RESUME_ACK)
-                if worker_msg.type == WorkerMessageType.STARTED.value: 
-                    # get node_configuration and see if LIVE node...
-                    node_type = node_configuration.type
-                    if node_type == "live":
-                        self.mark_topology_started_timestamp(lattice_id, run_id) # Mark the topology execution with a started timestamp in the cached topology state in Catalyst when the first worker reports that it has started processing a node. This allows for tracking when the topology execution started and can be useful for historical reference, debugging, and analysis of execution times and performance.
-                        self.update_node_status(lattice_id, run_id, node_id, NodeStatus.LIVE)
-                        self.residue(self.ash.INFO, "Updated node status to LIVE", lattice_id=lattice_id, run_id=run_id, node_id=node_id) 
-                    else:
-                        self.mark_topology_started_timestamp(lattice_id, run_id) # Mark the topology execution with a started timestamp in the cached topology state in Catalyst when the first worker reports that it has started processing a node. This allows for tracking when the topology execution started and can be useful for historical reference, debugging, and analysis of execution times and performance.
-                        self.update_node_status(lattice_id, run_id, node_id, NodeStatus.RUNNING)
-                        self.residue(self.ash.INFO, "Updated node status to RUNNING", lattice_id=lattice_id, run_id=run_id, node_id=node_id) 
-
-                elif worker_msg.type == WorkerMessageType.CHECKPOINT.value:
-                    if worker_msg.node_configuration.checkpoint_metadata.is_final and worker_msg.node_configuration.type != "live":
-                        self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg)
-                        self.update_node_status(lattice_id, run_id, node_id, NodeStatus.SUCCESS)
-                        self.residue(self.ash.INFO, "Updated node status to SUCCESS", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                    else:
-                        worker_msg.node_configuration.checkpoint_metadata.batch_index += 1 
-                        self.residue(self.ash.INFO, "Updated node checkpoint metadata in topology state", lattice_id=lattice_id, run_id=run_id, node_id=node_id, checkpoint_metadata=worker_msg.node_configuration.checkpoint_metadata)
-                        # Write Checkpoint Task Message to Worker Stream
-                        worker_msg.type = WorkerTaskType.CHECKPOINT_NODE.value
-                        try:
-                            self.catalyst.write_to_stream(self.worker_stream, worker_msg.to_dict()) # Write a checkpoint task message to the worker stream to acknowledge the checkpoint and provide any updated checkpoint metadata. This allows the worker to know that the checkpoint was received and processed by the controller, and it can use the updated checkpoint metadata to manage its state for the next batch of work. The controller can also use this opportunity to update the node status in the topology state in Catalyst if needed (e.g., if the checkpoint indicates that the node is still running but has made progress, we can keep it as RUNNING, but if the checkpoint indicates that the node has completed its work, we can update it to SUCCESS).
-                        except (ResponseError, RedisConnectionError) as e:
-                            self.residue(self.ash.WARNING, "Failed to write checkpoint to worker stream", error=str(e), lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                        
-                        self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg) 
-                        self.update_node_status(lattice_id, run_id, node_id, NodeStatus.DISPATCHED)
-                        self.residue(self.ash.INFO, "Updated node status to DISPATCHED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                
-                # elif worker_msg.type == WorkerMessageType.SUCCESS.value:
-                #     # This should never happend - checkpoint w/ is_final=true should be the only way for a node to report success 
-                #     pass
-                
-                elif worker_msg.type == WorkerMessageType.FAILED.value:
-                    # Handle failed acknowledgment - update node status to FAILED and record error details for debugging and potential retries
-                    self.update_node_checkpoint(lattice_id, run_id, node_id, worker_msg)
-                    # FUTURE - Add Retry Logic Here Based on Error Details and Retry Policies (E.G. MAX RETRIES, BACKOFF STRATEGIES, ETC.)
-                    self.update_node_status(lattice_id, run_id, node_id, NodeStatus.FAILED)
-                    self.residue(self.ash.INFO, "Updated node status to FAILED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                
-                elif worker_msg.type == WorkerMessageType.HEARTBEAT.value:
-                    # Handle heartbeat - update last seen timestamp for worker to monitor liveness and reset any dispatch timeouts
-                    pass
-                
-                # elif worker_msg.type == WorkerMessageType.PAUSE_ACK.value:
-                #     # Handle pause acknowledgment - update node status to PAUSED and ensure worker has committed any in-flight work before halting
-                #     pass
-                
-                # elif worker_msg.type == WorkerMessageType.RESUME_ACK.value:
-                #     # Handle resume acknowledgment - update node status to RUNNING and ensure worker has resumed processing from the correct cursor
-                #     pass
-            else:
-                self.residue(self.ash.INFO, "No messages in CONTROLLER stream. Waiting...")
-
             # 3 - Send Messages to Workers via Worker Stream for Nodes that are Ready to be Executed Based on Topology State in Catalyst (E.G. DISPATCH NODES WITH ALL DEPENDENCIES COMPLETED)
-            self.residue(self.ash.DEBUG, "Checking for nodes ready to dispatch...")
-            try:
-                active_topologies = self.catalyst.scan_keys(f"{self.topology_run_state_prefix}:*")
-            except (ResponseError, RedisConnectionError) as e:
-                self.residue(self.ash.WARNING, "Failed to scan for active topologies", error=str(e))
-                active_topologies = []
-            for topology_key in active_topologies:
-                self.residue(self.ash.INFO, "Active topology", topology_key=topology_key)
-                
-                lattice_id = topology_key.split(":")[-2] # Assuming the key format is "oxidizer:topology:active:lattice_id:run_id"
-                connections = self.get_lattice_connections(lattice_id)
-                
-                run_id = topology_key.split(":")[-1]
-                
-                topology_state = self.get_cached_topology_state(lattice_id, run_id)
-                if not topology_state:
-                    self.residue(self.ash.WARNING, "Topology state missing, skipping", lattice_id=lattice_id, run_id=run_id)
-                    continue
-                nodes = topology_state["nodes"]
-                statuses = topology_state["status"]
-                # iterate through each status and check if node is pending and if dependencies are met, then dispatch to worker stream and update status to running
-                for node_id, status in statuses.items():
-                    if status == NodeStatus.PENDING.value and self.check_node_dependencies(lattice_id, run_id, node_id):
-                        # Dispatch to worker stream
-
-                        node_details = nodes[node_id]
-                        node_layer = node_details["layer"]
-
-                        task_msg = TaskMessage(
-                            type=WorkerTaskType.START_NODE.value,
-                            lattice_id=lattice_id,
-                            connections=connections, 
-                            run_id=run_id,
-                            layer_id=node_layer,
-                            node_id=node_id,
-                            node_configuration=NodeConfiguration(**node_details).to_dict()
-                        )
-                        try:
-                            self.catalyst.write_to_stream(self.worker_stream, task_msg.to_dict())
-                            self.residue(self.ash.INFO, "Dispatched node to worker stream", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                            self.update_node_status(lattice_id, run_id, node_id, NodeStatus.DISPATCHED)
-                            self.residue(self.ash.INFO, "Updated node status to DISPATCHED", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                        except (ResponseError, RedisConnectionError) as e:
-                            self.residue(self.ash.WARNING, "Failed to dispatch node to worker stream", error=str(e), lattice_id=lattice_id, run_id=run_id, node_id=node_id)   
-                
-                # Check if All Nodes Are Complete and Archive Topology State if So
-                self.residue(self.ash.DEBUG, "Checking if topology execution is complete...", lattice_id=lattice_id, run_id=run_id)
-                if self.topology_complete(lattice_id, run_id):
-                    self.residue(self.ash.INFO, "Topology execution complete. Archiving topology state.", lattice_id=lattice_id, run_id=run_id, node_id=node_id)
-                    # Add Completion Timestamp to Topology State Before Archiving
-                    self.mark_topology_completed_timestamp(lattice_id, run_id)
-                    self.archive_topology_state(lattice_id, run_id)
+            self.process_active_topologies()

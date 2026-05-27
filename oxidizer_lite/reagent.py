@@ -5,132 +5,55 @@ import uuid
 import time
 import socket
 from functools import wraps
+from contextlib import contextmanager
 from memory_profiler import memory_usage
 
-from oxidizer_lite.anvil import APIEngine, SQLEngine, SQSEngine
+from oxidizer_lite.oxidizer import OxidizerKeys
+from oxidizer_lite.anvil import APIEngine, SQLEngine, SQSEngine, StreamEngine
 from oxidizer_lite.residue import Residue
 from oxidizer_lite.catalyst import Catalyst, CatalystConnection
 from oxidizer_lite.topology import WorkerMessageType, WorkerTaskType
-from oxidizer_lite.phase import GlueCatalogConnection, TaskMessage, NodeConfiguration, ErrorDetails, OutputSQLMethod, InputSQLMethod, InputStreamMethod, InputAPIMethod, OutputStreamMethod, OutputAPIMethod, APIConnection, DuckLakeConnection, ErrorDetails, SQSConnection, InputSQSMethod
+from oxidizer_lite.phase import CheckpointMetadata, GlueCatalogConnection, TaskMessage, NodeConfiguration, ErrorDetails, OutputSQLMethod, InputSQLMethod, InputStreamMethod, InputAPIMethod, OutputStreamMethod, OutputAPIMethod, OutputsConfiguration, APIConnection, DuckLakeConnection, ErrorDetails, SQSConnection, InputSQSMethod, InputFetchContext, InputFetchResult
 
 
-class Reagent(Residue):
-    def __init__(self, catalyst: CatalystConnection, auto_react: bool = False):
+class ReagentTaskHandler(Residue):
+    def __init__(self):
         """
-        Initializes the Reagent worker with a Catalyst connection, streams, and consumer groups.
-        
-        Args:
-            catalyst (CatalystConnection): The Redis connection configuration for the Catalyst cache engine.
-            auto_react (bool): Whether the Reagent should automatically react to tasks.
+        Initializes the ReagentTaskHandler worker which is responsible for handling task messages from the worker stream.
+
         """
-        super().__init__(component_name="reagent")
+        super().__init__(component_name="reagent_task_handler")
+        self.controller_stream = OxidizerKeys.CONTROLLER_STREAM
 
-        self.oxidizer_ascii_art()
-
-        self.catalyst = Catalyst(catalyst)  
-        self.auto_react = auto_react
-
-        # Oxidizer Streams and Consumer Group Names
-        self.oxidizer_consumer_group = "worker-group" 
-        self.oxidizer_consumer_name = "worker-" + socket.gethostname() + "-" + str(uuid.uuid4()) 
-        self.worker_stream = "oxidizer:streams:worker"
-        self.controller_stream = "oxidizer:streams:controller" 
-        self.catalyst.create_consumer_group(self.worker_stream, self.oxidizer_consumer_group) 
-
-
-    # General Task Handlers / Helpers
-    def _handle_task_message(self, msg_id: str, task: TaskMessage):
-        """
-        Handles a task message from the worker stream by processing the task based on its type and acknowledging the message.
-        
-        Args:
-            msg_id (str): The ID of the message from the worker stream to acknowledge after processing.
-            task (TaskMessage): The task message containing details about the task to be processed.
-        """
-        # Task Message Handler 
-        task_type = task.type
-        lattice_id = task.lattice_id
-        run_id = task.run_id
-        node_id = task.node_id
-        
-        if task_type in [WorkerTaskType.START_NODE.value, WorkerTaskType.CHECKPOINT_NODE.value]: 
-            self._acknowledge_dispatched_task_msg(msg_id, task) 
-        else:   
-            self.residue(self.ash.ERROR, "Received unknown worker task type", task=task, lattice_id=lattice_id, run_id=run_id, node_id=node_id) 
-
-    def _acknowledge_dispatched_task_msg(self, msg_id: str, task: TaskMessage):
-        """
-        Acknowledges a dispatched task message from the worker stream and sends a STARTED update to the controller.
-        
-        Args:
-            msg_id (str): The ID of the message from the worker stream to acknowledge.
-            task (TaskMessage): The task message containing details about the task that was processed.
-        """
-        # Write the Worker Message to Controller Stream (WorkerMessageType.STARTED)
-        task.type = WorkerMessageType.STARTED.value
-        self.catalyst.write_to_stream(self.controller_stream, task.to_dict()) 
-        
-        # ??? Should the ack be here? Or agt the end of processing
-        self.catalyst.acknowledge_message(self.worker_stream, self.oxidizer_consumer_group, msg_id) 
-
-    def _checkpoint_task_msg(self, task: TaskMessage):
+    def send_checkpoint_task_msg(self, catalyst: Catalyst, task: TaskMessage):
         """
         Sends a checkpoint update to the controller stream for a long-running node.
         
         Args:
+            catalyst (Catalyst): The catalyst instance used to write to the stream.
             task (TaskMessage): The task message containing checkpoint metadata for the node.
         """
         task.type = WorkerMessageType.CHECKPOINT.value 
         
         # Write Checkpoint Message to Controller Stream (WorkerMessageType.CHECKPOINT)
-        self.catalyst.write_to_stream(self.controller_stream, task.to_dict()) 
+        catalyst.write_to_stream(self.controller_stream, task.to_dict()) 
 
-        
-    # FUTURE: Fix - Change error_details from dict to ErrorDetails - This will require the use of the function and the lines before it to be slightly refactored
-    def _failed_task_msg(self, oxidizer_task: TaskMessage, error_details: ErrorDetails):
+    def send_failed_task_msg(self, catalyst: Catalyst, task: TaskMessage, error_details: ErrorDetails):
         """
         Sends a failure update to the controller stream with error details and checkpoint metadata.
         
         Args:
-            oxidizer_task (TaskMessage): The task message containing details about the failed task.
+            catalyst (Catalyst): The catalyst instance used to write to the stream.
+            task (TaskMessage): The task message containing details about the failed task.
             error_details (ErrorDetails): The error details including error type, message, and stack trace.
         """
         # Write Checkpoint Message to Controller Stream (WorkerMessageType.CHECKPOINT)
-        oxidizer_task.type = WorkerMessageType.FAILED.value
-        oxidizer_task.node_configuration.error_details = error_details
+        task.type = WorkerMessageType.FAILED.value
+        task.node_configuration.error_details = error_details
 
-        self.catalyst.write_to_stream(self.controller_stream, oxidizer_task.to_dict()) 
+        catalyst.write_to_stream(self.controller_stream, task.to_dict()) 
 
-
-    def _lattice_connections_lookup(self, connections: list[APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection]):
-        """
-        Creates a lookup dictionary for lattice connections by name.
-        
-        Args:
-            connections (list): A list of lattice connection dicts from the topology configuration.
-        
-        Returns:
-            dict: A dictionary mapping connection names to their typed connection objects.
-        """
-        connections_dict = {}
-        for connection in connections:
-            name = connection.get("name")
-            type = connection.get("type")
-            if type == "glue_catalog":
-                connection = GlueCatalogConnection(**connection)
-            elif type == "ducklake":
-                connection = DuckLakeConnection(**connection)
-            elif type == "api":
-                connection = APIConnection(**connection)
-            elif type == "sqs":
-                connection = SQSConnection(**connection)
-            else:
-                self.residue(self.ash.ERROR, f"Unknown connection type '{type}' for connection '{name}' in lattice configuration.", connection=connection)
-                continue
-            connections_dict[name] = connection
-        return connections_dict
-
-    def _update_checkpoint_metadata(self, task: TaskMessage, input_final:dict, input_methods:dict, input_cursors: dict = None):
+    def update_checkpoint_metadata(self, task: TaskMessage, input_final:dict, input_methods:dict, input_cursors: dict = None):
         """
         Updates the checkpoint metadata based on input completion status and methods used.
         
@@ -142,114 +65,82 @@ class Reagent(Residue):
         Returns:
             TaskMessage: The updated task message with modified checkpoint metadata.
         """
-        # Update Is Final Checkpoint Logic Based on If Batching is Complete
-        if all(input_final.values()):  
-            task.node_configuration.checkpoint_metadata.is_final = True
-            task.node_configuration.checkpoint_metadata.batch_methods = input_methods 
-            task.node_configuration.checkpoint_metadata.batch_cursors = input_cursors
-        else:  
-            task.node_configuration.checkpoint_metadata.is_final = False
-            task.node_configuration.checkpoint_metadata.batch_methods = input_methods
-            task.node_configuration.checkpoint_metadata.batch_cursors = input_cursors
-            # FUTURE: Fix How to Handle Partial + Full Batches
-            print("ADD LATER - BUT THIS SHOULD FAIL... OR WE NEED HANDLE IT SPECIAL or ADJUST BATCH SIZES = THIS IS FOR MULTIPLE INPUTS")
+        meta = task.node_configuration.checkpoint_metadata
+        meta.is_final = all(input_final.values())
+        meta.batch_methods = input_methods
+        meta.batch_cursors = input_cursors
+        # FUTURE: Handle partial batches — when only some inputs are exhausted,
+        #         is_final=False may still need special cursor/batch size adjustment
         return task
 
-    # Input / Output Handlers
-    def _handle_incoming_stream(self, lattice_id: str, node_id: str, input_ref: str, method: InputStreamMethod):
+class ReagentInputHandler(Residue):
+    def __init__(self, catalyst: Catalyst):
+        """
+        Initializes the ReagentInputHandler worker which is responsible for handling incoming data for a node.
+
+        """
+        super().__init__(component_name="reagent_input_handler")
+        self.oxidizer_consumer_name = "worker-" + socket.gethostname() + "-" + str(uuid.uuid4())
+        self.stream_engine = StreamEngine(catalyst, self.oxidizer_consumer_name)
+
+    
+    def handle_incoming_stream(self, method: InputStreamMethod, connection=None, context: InputFetchContext = None) -> InputFetchResult:
         """
         Handles incoming data for a node from a Redis stream.
         
         Args:
-            lattice_id (str): The identifier of the lattice configuration.
-            node_id (str): The identifier of the node being processed.
-            input_ref (str): The reference identifier for the input dependency.
             method (InputStreamMethod): The stream method details including batch size, block time, and windowing.
+            connection: Unused; present for interface uniformity with other handlers.
+            context (InputFetchContext): Per-call routing context providing lattice_id, node_id, and input_ref.
         
         Returns:
-            tuple: A tuple of (data, future_ack_msgs) where data is a list of records and future_ack_msgs is a list of (stream, group, msg_id) tuples to acknowledge after processing.
+            InputFetchResult: Unified result containing data, is_final flag, and ack_msgs.
         """
-        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_ref} using stream retrieval strategy", **method.to_dict()) 
-        stream = f"oxidizer:data:{input_ref}"
-        window = method.window
-        consumer_group = f"{lattice_id}.{node_id}"
+        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {context.input_ref} using stream retrieval strategy", **method.to_dict())
+        stream_key = OxidizerKeys.data_stream(context.input_ref)
+        consumer_group = f"{context.lattice_id}.{context.node_id}"
         # DO WE NEED TO INCLUDE LATTICE IN THE STREAM NAME?
         # UPDATE TO HANDLE THE WINDOW AND THE BATCH AND BLOCK ACCORDINGLY
-        self.catalyst.create_consumer_group(stream, consumer_group) 
-        raw_data = self.catalyst.read_from_stream(stream, consumer_group, self.oxidizer_consumer_name, count=method.batch_size, block=method.block)
-        future_ack_msgs = []
-        data = []
-        for msg_id, msg in raw_data:
-            future_ack_msgs.append((stream, consumer_group, msg_id)) 
-            data.append(msg)
-        return data, future_ack_msgs
+        data, ack_msgs = self.stream_engine.read(stream_key, consumer_group, method.batch_size, method.block)
+        is_final = len(data) < method.batch_size
+        return InputFetchResult(data=data, is_final=is_final, ack_msgs=ack_msgs)
     
-    def _handle_outgoing_stream(self, node_id: str, data: list):
-        """
-        Handles outgoing data for a node by writing records to a Redis stream.
-        
-        Args:
-            node_id (str): The identifier of the node, used to derive the output stream name.
-            data (list): A list of data records to write to the output stream.
-        """
-        # DO WE NEED TO INCLUDE LATTICE IN THE STREAM NAME?
-        stream = f"oxidizer:data:{node_id}"
-        self.catalyst.create_stream(stream) 
-        for msg in data:
-            self.catalyst.write_to_stream(stream, msg)
-        return 
-
-    def _handle_incoming_sqs(self, method: InputSQSMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection]):
+    def handle_incoming_sqs(self, method: InputSQSMethod, connection: SQSConnection, context: InputFetchContext) -> InputFetchResult:
         """
         Handles incoming data for a node from an SQS queue.
         
         Args:
             method (InputSQSMethod): The SQS method details including connection, batch size, and wait time.
-            connections_lookup (dict): A dictionary mapping connection names to their typed connection objects.
+            connection (SQSConnection): The SQS connection object.
+            context (InputFetchContext): Per-call context; not used directly by this handler.
         Returns:
-            tuple: A tuple of (data, future_ack_msgs) where data is a list of records and future_ack_msgs is a list of receipt handles to acknowledge after processing.
+            InputFetchResult: Unified result containing data, is_final flag, and ack_msgs (receipt handles).
         """
-        self.residue(self.ash.INFO, f"Fetching data from upstream dependency using SQS retrieval strategy", **method.to_dict()) 
-        
-        # Connection Details
-        method_connection = method.connection
-        connection = connections_lookup.get(method_connection) 
-        
-        # SQS Engine
-        sqs_engine = SQSEngine(connection) 
-        
-        # Fetch Messages from SQS Queue
+        self.residue(self.ash.INFO, f"Fetching data from upstream dependency using SQS retrieval strategy", **method.to_dict())
+        sqs_engine = SQSEngine(connection)
         raw_messages = sqs_engine.receive_messages(method.batch_size, method.wait_time)
-        
         data = []
-        future_ack_msgs = []
+        ack_msgs = []
         for msg in raw_messages:
-            data.append(msg.body) 
-            future_ack_msgs.append(msg.receipt_handle) 
-        return data, future_ack_msgs
+            data.append(msg.body)
+            ack_msgs.append(msg.receipt_handle)
+        is_final = len(data) < method.batch_size
+        return InputFetchResult(data=data, is_final=is_final, ack_msgs=ack_msgs)
 
-    
-    
-    def _handle_incoming_sql(self, method: InputSQLMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection], batch_idx: int, batch_size: int):
+    def handle_incoming_sql(self, method: InputSQLMethod, connection: GlueCatalogConnection | DuckLakeConnection, context: InputFetchContext) -> InputFetchResult:
         """
         Handles incoming data for a node by executing a SQL query and returning the results.
         
         Args:
             method (InputSQLMethod): The SQL method details including connection, database, table, and query parameters.
-            connections_lookup (dict): A dictionary mapping connection names to their typed connection objects.
-            batch_idx (int): The zero-based batch index for paginated query execution.
-            batch_size (int): The number of rows per batch.
-        
+            connection (GlueCatalogConnection | DuckLakeConnection): The SQL connection object.
+            context (InputFetchContext): Per-call context; provides batch_index for paginated queries.
         Returns:
-            list: A list of data records returned from the SQL query.
+            InputFetchResult: Unified result containing data and is_final flag.
         """
         self.residue(self.ash.INFO, f"PRE PROCESS: Processing Incoming Data using SQL retrieval strategy", database=method.database, table=method.table, sql_type=method.sql_type, batch_size=method.batch_size) 
         self.residue(self.ash.DEBUG, f"SQL method filters", filters=method.filters, columns=method.columns)
         
-        # SQL Connection Details
-        method_connection = method.connection
-        connection = connections_lookup.get(method_connection) 
-
         # SQL Catalog
         catalog = connection.name  
 
@@ -274,11 +165,106 @@ class Reagent(Residue):
                 query = sql_engine.select_query_str(database, table, columns=columns, where=filters, order_by=sort_by, limit=limit)
                 
         # Query Execution
-        data = sql_engine.execute_batch_query(query, batch_idx=batch_idx, batch_size=batch_size)
+        data = sql_engine.execute_batch_query(query, batch_idx=context.batch_index, batch_size=method.batch_size)
         sql_engine.close()
-        return data
+        is_final = len(data) < method.batch_size
+        return InputFetchResult(data=data, is_final=is_final)
 
-    def _handle_outgoing_sql(self, method: OutputSQLMethod, connections_lookup: dict[str, APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection], schema: dict, data: list, table_description=None):
+    def handle_incoming_api(self, method: InputAPIMethod, connection: APIConnection, context: InputFetchContext) -> InputFetchResult:
+        """
+        Handles incoming data for a node by making an API call and returning the response.
+        
+        Args:
+            method (InputAPIMethod): The API method details including connection, endpoint, HTTP method, and payload template.
+            connection (APIConnection): The API connection object.
+            context (InputFetchContext): Per-call context; provides cursor, trigger_data, and trigger_attribute.
+        Returns:
+            InputFetchResult: Unified result containing data, is_final flag, and next_cursor.
+        """
+        self.residue(self.ash.INFO, "Handling incoming API method for input dependency", **method.to_dict())
+        cursor = context.cursor
+        trigger_attribute = context.trigger_attribute
+        trigger_data = context.trigger_data
+
+        # API Call Details
+        endpoint = method.endpoint
+        request_method = method.http_method
+        data_selector = method.path
+        paginator = method.paginator
+        next_cursor = None
+
+        # API Engine
+        api = APIEngine(connection.to_dict())
+
+        # Build URL for API Call
+        if cursor is not None:
+            url = cursor
+        elif endpoint is not None:
+            url = f"{api.base_url}{endpoint}"
+        elif trigger_attribute is not None and trigger_data is not None:
+            endpoint = trigger_data.get(trigger_attribute)
+            url = f"{api.base_url}{endpoint}"
+        else:
+            self.residue(self.ash.WARNING, "No valid endpoint or cursor provided for API call in incoming API method", method=method.method, endpoint=endpoint, cursor=cursor, trigger_attribute=trigger_attribute, trigger_data=trigger_data)
+            raise ValueError("No valid endpoint or cursor provided for API call")
+        
+        # Make API Call Based on Request Method
+        if request_method == "GET":
+            data = api.get(url)
+        elif request_method == "POST":
+            payload = {}
+            data = api.post(url, payload)
+
+        
+        # API Post Processing for Pagination and Data Selection
+        if paginator is not None:
+            if paginator in data:
+                next_cursor = data[paginator]
+
+        if data_selector is not None:
+            keys = data_selector.lstrip("$.").split(".")
+            for key in keys:
+                data = data.get(key, {})
+
+        is_final = next_cursor is None
+        return InputFetchResult(data=data, is_final=is_final, next_cursor=next_cursor)
+
+class ReagentOutputHandler(Residue):
+    def __init__(self):
+        """
+        Initializes the ReagentOutputHandler worker which is responsible for handling outgoing data for a node.
+
+        """
+        super().__init__(component_name="reagent_output_handler")
+
+    def handle_outgoing_api(self, method: OutputAPIMethod, connection: APIConnection, data: list):
+        """
+        Handles outgoing data for a node by posting records to an API endpoint.
+
+        Args:
+            method (OutputAPIMethod): The API output method details including endpoint and HTTP method.
+            connection (APIConnection): The API connection object.
+            data (list): A list of data records to post to the API.
+        """
+        # FUTURE: Implement API output handler
+        pass
+
+    def handle_outgoing_stream(self, catalyst: Catalyst, node_id: str, data: list):
+        """
+        Handles outgoing data for a node by writing records to a Redis stream.
+        
+        Args:
+            node_id (str): The identifier of the node, used to derive the output stream name.
+            data (list): A list of data records to write to the output stream.
+        """
+        # DO WE NEED TO INCLUDE LATTICE IN THE STREAM NAME? 
+        stream = OxidizerKeys.data_stream(node_id)
+        catalyst.create_stream(stream) 
+        for msg in data:
+            catalyst.write_to_stream(stream, msg)
+        return
+
+    def handle_outgoing_sql(self, method: OutputSQLMethod, connection: GlueCatalogConnection | DuckLakeConnection, schema: dict, data: list, table_description=None):
         """
         Handles outgoing data for a node by writing records to a SQL database.
         
@@ -293,7 +279,6 @@ class Reagent(Residue):
         
         # Connection Details
         method_connection = method.connection
-        connection = connections_lookup.get(method_connection) 
 
         # SQL Engine
         engine_name = connection.name 
@@ -369,84 +354,252 @@ class Reagent(Residue):
         return 
 
 
-    def _handle_incoming_api(self, method: InputAPIMethod, connections_lookup: dict[str, APIConnection | DuckLakeConnection], cursor: str = None):
+
+
+
+
+class Reagent(Residue):
+    def __init__(self, catalyst: CatalystConnection, auto_react: bool = False):
         """
-        Handles incoming data for a node by making an API call and returning the response.
+        Initializes the Reagent worker with a Catalyst connection, streams, and consumer groups.
         
         Args:
-            method (InputAPIMethod): The API method details including connection, endpoint, HTTP method, and payload template.
-            connections_lookup (dict): A dictionary mapping connection names to their typed connection objects.
-        
-        Returns:
-            dict | list: The data returned from the API call.
+            catalyst (CatalystConnection): The Redis connection configuration for the Catalyst cache engine.
+            auto_react (bool): Whether the Reagent should automatically react to tasks.
         """
-        self.residue(self.ash.INFO, "Handling incoming API method for input dependency", **method.to_dict()) 
+        super().__init__(component_name="reagent")
+
+        self.oxidizer_ascii_art()
+
+        # Catalyst Setup
+        self.catalyst = Catalyst(catalyst)
+
+        # Reagent Handlers
+        self.task_handler = ReagentTaskHandler()
+        self.input_handler = ReagentInputHandler(self.catalyst)
+        self.output_handler = ReagentOutputHandler()
+        self.auto_react = auto_react
+
+        # Oxidizer Streams and Consumer Group Names
+        self.oxidizer_consumer_group = "worker-group" 
+        self.oxidizer_consumer_name = "worker-" + socket.gethostname() + "-" + str(uuid.uuid4()) 
         
-        # Connection Details
-        method_connection = method.connection
-        connection = connections_lookup.get(method_connection) 
-        
-        # API Call Details
-        endpoint = method.endpoint
-        request_method = method.http_method
-        data_selector = method.path 
-        paginator = method.paginator
-        next_cursor = None
+        self.worker_stream = OxidizerKeys.WORKER_STREAM # "oxidizer:streams:worker"
+        self.controller_stream = OxidizerKeys.CONTROLLER_STREAM # "oxidizer:streams:controller"
+        self.catalyst.create_consumer_group(self.worker_stream, self.oxidizer_consumer_group) 
 
-        # API Engine
-        api = APIEngine(connection.to_dict()) 
-        
-        # Make API Call Based on Request Method
-        if request_method == "GET":
-            response = api.get(endpoint, cursor=cursor)
 
-        if paginator is not None:
-            if paginator in response:
-                next_cursor = response[paginator]
-
-        # FUTURE: Fix - Add data_selector Logic
-        if data_selector is not None:
-            keys = data_selector.lstrip("$.").split(".")
-            data = response
-            for key in keys:
-                data = data.get(key, {})
-        else:                            
-            data = response
-
-        return data, next_cursor
-
-    def _handle_outgoing_api(self, method: OutputAPIMethod, connections, data):
+    # Connections Lookup Dictionary
+    def lattice_connections_lookup_dict(self, connections: list[APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection]):
         """
-        Handles outgoing data for a node by making an API call to send the processed results.
+        Creates a lookup dictionary for lattice connections by name.
         
         Args:
-            method (OutputAPIMethod): The API output method details including connection, endpoint, and HTTP method.
-            connections (dict): A dictionary mapping connection names to their connection detail dicts.
-            data (dict | list): The data to send as part of the API request body.
+            connections (list): A list of lattice connection dicts from the topology configuration.
         
         Returns:
-            dict | list: The response returned from the API call.
+            dict: A dictionary mapping connection names to their typed connection objects.
         """
-        self.residue(self.ash.INFO, "Handling outgoing API method for output dependency", method=method.to_dict()) 
-        
-        # Connection Details
-        method_connection = method.connection
-        connection = connections.get(method_connection, {}) # Get the connection details for the API
-        
-        # API Call Details
-        endpoint = method.endpoint
-        request_method = method.http_method
-        
-        # API Engine
-        api = APIEngine(connection) # Initialize the API engine with the connection details provided
-        
-        # Make API Call Based on Request Method
-        if request_method == "POST":
-            response = api.post(endpoint, {"data": data})
-        return response 
+        connections_dict = {}
+        for connection in connections:
+            name = connection.get("name")
+            type = connection.get("type")
+            if type == "glue_catalog":
+                connection = GlueCatalogConnection(**connection)
+            elif type == "ducklake":
+                connection = DuckLakeConnection(**connection)
+            elif type == "api":
+                connection = APIConnection(**connection)
+            elif type == "sqs":
+                connection = SQSConnection(**connection)
+            else:
+                self.residue(self.ash.ERROR, f"Unknown connection type '{type}' for connection '{name}' in lattice configuration.", connection=connection)
+                continue
+            connections_dict[name] = connection
+        return connections_dict
+
+    # Incoming / Outgoing Task Handlers
+    def handle_incoming_task(self, stream: str):
+        try:
+            # Read from the worker task stream
+            tasks = self.catalyst.read_from_stream(stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name, count=1)
+            if not tasks:
+                return None, None
+            
+            # Get Message and Task Details
+            msg_id, task = tasks[0] 
+            oxidizer_task = TaskMessage.from_dict(task)
+            oxidizer_task.type = WorkerMessageType.STARTED.value
+            self.catalyst.write_to_stream(self.controller_stream, oxidizer_task.to_dict()) 
+            return oxidizer_task, msg_id
+        except Exception as e:
+            self.residue(self.ash.CRITICAL, "PRE PROCESS: Error Occurred during pre-processing setup", error=str(e), task=oxidizer_task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id) 
+            return None, None
     
+    def handle_outgoing_task(self, task_msg_id: str, task: TaskMessage, input_data_ack_msgs: list):
+        try:
+            # Acknowledge the worker data messages after processing is complete
+            for ack_msg in input_data_ack_msgs:
+                self.catalyst.acknowledge_message(*ack_msg) 
+
+            # Update Checkpoint Metadata and Send Checkpoint Update to Controller
+            self.task_handler.send_checkpoint_task_msg(self.catalyst, task)
+
+            # Acknowledge the worker task message after processing is complete
+            self.catalyst.acknowledge_message(self.worker_stream, self.oxidizer_consumer_group, task_msg_id) 
+        except Exception as e:
+            self.residue(self.ash.CRITICAL, "POST PROCESS: Error Occurred during post-processing cleanup", error=str(e), task=task, node_id=task.node_id, run_id=task.run_id, layer_id=task.layer_id, lattice_id=task.lattice_id)
+            raise e 
 
 
+    # Incoming / Outgoing Data Handlers
+    def handle_incoming_data(self, task: TaskMessage):
+        """
+        Handles incoming data for a node based on the specified retrieval method type.
+        
+        Args:
+            task (TaskMessage): The task message containing the node configuration and connections.
+        Returns:
+            The data fetched based on the input method type, along with any relevant metadata for checkpointing.
+        """
+        lattice_id = task.lattice_id
+        layer_id = task.layer_id
+        node_id = task.node_id
+        inputs = task.node_configuration.inputs
+        checkpoint_metadata = task.node_configuration.checkpoint_metadata
+        connections = task.connections
+        connections_dict = self.lattice_connections_lookup_dict(connections)
+        try:
+            input_data = {} 
+            input_final = {}
+            input_cursors = {}
+            input_batch_methods = {}
+            input_data_ack_msgs = []
+            
+            for input in inputs:
+                input_ref = input.ref
+                input_name = input.alias or input_ref
+                input_methods = input.methods 
+
+                for method in input_methods:
+                    method_type = method.method
+                    method_connection = connections_dict.get(method.connection)
+
+                    # API trigger pre-processing: fetch stream record for dynamic endpoint construction.
+                    # This is orchestration logic and runs before context is built.
+                    trigger_data = None
+                    trigger_attribute = None
+                    if method_type == "api" and method.input_trigger is not None:
+                        checkpoint_cursor = checkpoint_metadata.batch_cursors.get(input_name) if checkpoint_metadata.batch_cursors else None
+                        if checkpoint_cursor is None:  # Only use input trigger for the initial API call, not for subsequent paginated calls
+                            trigger = method.input_trigger
+                            trigger_attribute = trigger.attribute
+                            if trigger.type == "stream":
+                                stream_method = InputStreamMethod(method=trigger.type, batch_size=1)
+                                trigger_context = InputFetchContext(lattice_id=lattice_id, node_id=node_id, input_ref=input_ref)
+                                trigger_result = self.input_handler.handle_incoming_stream(stream_method, context=trigger_context)
+                                trigger_data = trigger_result.data[0] if trigger_result.data else None
+                                input_data_ack_msgs.extend(trigger_result.ack_msgs)
+
+                    # Build per-fetch context
+                    context = InputFetchContext(
+                        lattice_id=lattice_id,
+                        node_id=node_id,
+                        input_ref=input_ref,
+                        batch_index=checkpoint_metadata.batch_index,
+                        cursor=checkpoint_metadata.batch_cursors.get(input_name) if checkpoint_metadata.batch_cursors else None,
+                        trigger_data=trigger_data,
+                        trigger_attribute=trigger_attribute,
+                    )
+
+                    if method_type == "stream":
+                        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using stream retrieval strategy", method=method.to_dict())
+                        input_batch_methods[input_name] = "stream"
+                        result = self.input_handler.handle_incoming_stream(method, context=context)
+                    elif method_type == "sql":
+                        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using SQL retrieval strategy with method details", database=method.database, table=method.table, sql_type=method.sql_type, batch_size=method.batch_size)
+                        input_batch_methods[input_name] = "sql"
+                        result = self.input_handler.handle_incoming_sql(method, method_connection, context)
+                    elif method_type == "api":
+                        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using API retrieval strategy", endpoint=method.endpoint, api_method=method.http_method)
+                        input_batch_methods[input_name] = "api"
+                        result = self.input_handler.handle_incoming_api(method, method_connection, context)
+                    elif method_type == "sqs":
+                        self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using SQS retrieval strategy", method=method.to_dict())
+                        input_batch_methods[input_name] = "sqs"
+                        result = self.input_handler.handle_incoming_sqs(method, method_connection, context)
+                    else:
+                        self.residue(self.ash.WARNING, f"Unknown retrieval method type: {method_type} for input dependency {input_name}. Skipping this method.")
+                        raise ValueError(f"Unknown retrieval method type: {method_type}")
+
+                    input_data[input_name] = result.data
+                    input_final[input_name] = result.is_final
+                    input_cursors[input_name] = result.next_cursor
+                    input_data_ack_msgs.extend(result.ack_msgs)
+                    break
+
+                task = self.task_handler.update_checkpoint_metadata(task, input_final, input_batch_methods, input_cursors)
+                return input_data, input_data_ack_msgs
+        
+        except Exception as e:
+            self.residue(self.ash.CRITICAL, f"Error occurred during fetching of input data for {node_id}", error=str(e), task=task, node_id=node_id, run_id=task.run_id, layer_id=layer_id, lattice_id=lattice_id)
+            raise e
+
+    def handle_outgoing_data(self, task: TaskMessage, data: dict):
+        """
+        Handles outgoing data for a node based on the specified output method type.
+        
+        Args:
+            data: The data to be outputted, which can be in various formats depending on the node's processing logic.
+            schema: The schema definition for the output data, used for SQL outputs.
+            outputs: A list of output details which can be of type OutputStreamMethod or OutputSQLMethod.
+            connections_dict: A dictionary mapping connection names to their typed connection objects.
+        """
+        lattice_id = task.lattice_id
+        layer_id = task.layer_id
+        node_id = task.node_id
+        schema = task.node_configuration.schema
+        outputs = task.node_configuration.outputs
+        connections = task.connections
+        connections_dict = self.lattice_connections_lookup_dict(connections)
+        try:
+            output_methods = outputs.methods
+            for method in output_methods:
+                method_type = method.method
+                method_connection = connections_dict.get(method.connection)
+
+                if method_type == "stream":
+                    self.residue(self.ash.INFO, f"Writing data to downstream dependency {node_id} using stream output strategy", method=method.method) 
+                    self.output_handler.handle_outgoing_stream(self.catalyst, node_id, data)
+                elif method_type == "sql":
+                    self.residue(self.ash.INFO, f"Writing data to downstream dependency {node_id} using SQL output strategy with method details", database=method.database, table=method.table, sql_type=method.sql_type) 
+                    self.output_handler.handle_outgoing_sql(method, method_connection, schema, data, table_description=task.node_configuration.description)
+                elif method_type == "api":
+                    self.residue(self.ash.INFO, f"Writing data to downstream dependency {node_id} using API output strategy", endpoint=method.endpoint, api_method=method.http_method) 
+                    self.output_handler.handle_outgoing_api(method, method_connection, data)
+                    
+                else:
+                    self.residue(self.ash.WARNING, f"Unknown output method type: {method_type} for output dependency {node_id}. Skipping this method.")
+                    raise ValueError(f"Unknown output method type: {method_type}")
+        except Exception as e:
+            self.residue(self.ash.CRITICAL, f"Error occurred during handling of outgoing data for {node_id}", error=str(e), task=task, node_id=node_id, run_id=task.run_id, layer_id=layer_id, lattice_id=lattice_id)
+            raise e
+
+
+    @contextmanager
+    def _timed_phase(self, task: TaskMessage, phase: str):
+        start = time.time()
+        mem_start = memory_usage(-1, interval=.01, timeout=1)
+        yield
+        elapsed = time.time() - start
+        mem_delta = max(memory_usage(-1, interval=.01, timeout=1)) - max(mem_start)
+        meta = task.node_configuration.checkpoint_metadata
+        setattr(meta, f"accumulated_{phase}_runtime",
+                getattr(meta, f"accumulated_{phase}_runtime") + elapsed)
+        setattr(meta, f"accumulated_{phase}_memory",
+                getattr(meta, f"accumulated_{phase}_memory") + mem_delta)
+
+    # Main Reagent Decorator
     def react(self, dedicated_stream: str = None):
         """
         Decorator factory that wraps a user function with task stream pre/post processing.
@@ -463,248 +616,100 @@ class Reagent(Residue):
         def decorator(func):
             @wraps(func)
             def wrapper(*args, **kwargs):
-                
                 ##############################################################################
                 ## PRE PROCESSING AND SETUP
-                preprocess_start = time.time()
-                preprocess_memory_start = memory_usage(-1, interval=.01, timeout=1)
-                try:
-                    # Read from the worker task stream
-                    tasks = self.catalyst.read_from_stream(stream, self.oxidizer_consumer_group, self.oxidizer_consumer_name, count=1)
-                    if not tasks:
-                        return None
-
-                    # Get Message and Task Details
-                    msg_id, task = tasks[0] 
-                    node_configuration = NodeConfiguration(**task["node_configuration"])
-                    
-                    oxidizer_task = TaskMessage.from_dict(task)
-                    self._handle_task_message(msg_id, oxidizer_task)
-                    
-                    # Lattice Details
-                    lattice_id = oxidizer_task.lattice_id
-                    connections = oxidizer_task.connections
-                    connections_dict = self._lattice_connections_lookup(connections)
-                    
-                    # Node ID and Node Configuration Details
-                    node_id = oxidizer_task.node_id
-                    
-                    description = oxidizer_task.node_configuration.description
-                    inputs = oxidizer_task.node_configuration.inputs
-                    schema = oxidizer_task.node_configuration.schema
-                    outputs = oxidizer_task.node_configuration.outputs
-                    checkpoint_metadata = oxidizer_task.node_configuration.checkpoint_metadata
-
-                except Exception as e:
-                    self.residue(self.ash.CRITICAL, "PRE PROCESS: Error Occurred during pre-processing setup", error=str(e), task=oxidizer_task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id) 
-                    error_details = ErrorDetails(
-                        error_type=type(e).__name__,
-                        error_message=str(e)
-                    )
-                    self._failed_task_msg(oxidizer_task, error_details=error_details) 
+                task, msg_id = self.handle_incoming_task(stream)
+                if task is None:
                     return None
                 ##############################################################################
 
+                ##############################################################################
+                ## TASK DETAILS 
+                lattice_id = task.lattice_id
+                layer_id = task.layer_id
+                node_id = task.node_id
+                ##############################################################################
 
                 ##############################################################################
-                # INPUT DATA FETCHING LOGIC
+                ## INPUT DATA FETCHING LOGIC (TIMED)
+                with self._timed_phase(task, "preprocess"):
+                    try:
+                        input_data, input_data_ack_msgs = self.handle_incoming_data(task)
+                    except Exception as e:
+                        self.residue(self.ash.CRITICAL, "Error occurred during fetching of input data for the task", error=str(e), task=task, node_id=task.node_id, run_id=task.run_id, layer_id=task.layer_id, lattice_id=task.lattice_id) 
+                        error_details = ErrorDetails(error_type=type(e).__name__, error_message=str(e))
+                        self.task_handler.send_failed_task_msg(self.catalyst, task, error_details=error_details)
+                        raise e
+                ##############################################################################
+                
+
+
+
+                ##############################################################################
+                ## CUSTOM FUNCTION LOGIC GOES HERE (TIMED)
+                with self._timed_phase(task, "function"):
+                    self.residue(self.ash.INFO, f"Executing user defined function for {layer_id}.{node_id}", node_id=node_id, run_id=task.run_id, layer_id=layer_id, lattice_id=lattice_id)
+                    try:
+                        context = {
+                            "lattice_id": task.lattice_id,
+                            "run_id": task.run_id,
+                            "layer_id": task.layer_id,
+                            "node_id": task.node_id
+                        }
+                        result = func(input_data, context)
+                        
+                        # Convert to JSON
+                        if isinstance(result, (str, int, float, bool)):
+                            result = json.loads(result) 
+
+                    except Exception as e:
+                        self.residue(self.ash.ERROR, "Error occurred during execution of the user function for the task", error=str(e), node_id=task.node_id, run_id=task.run_id, layer_id=task.layer_id, lattice_id=task.lattice_id) 
+                        error_details = ErrorDetails(
+                            error_type=type(e).__name__,
+                            error_message=str(e)
+                        )
+                        self.task_handler.send_failed_task_msg(self.catalyst, task, error_details=error_details) 
+                        raise e 
+                ##############################################################################
+                
+                
+
+
+
+
+                
+                ##############################################################################
+                ## POST PROCESS DOWNSTREAM DATA (TIMED)
+                with self._timed_phase(task, "postprocess"):
+                    try:
+                        self.handle_outgoing_data(task, result)
+                    except Exception as e:
+                        self.residue(self.ash.CRITICAL, "Error occurred while handling outgoing data for the task", error=str(e), task=task, node_id=task.node_id, run_id=task.run_id, layer_id=task.layer_id, lattice_id=task.lattice_id) 
+                        error_details = ErrorDetails(error_type=type(e).__name__, error_message=str(e))
+                        self.task_handler.send_failed_task_msg(self.catalyst, task, error_details=error_details)
+                        raise e
+
+                ##############################################################################
+
+                ##############################################################################
+                ## POST PROCESS HANDLE OUTGOING TASK (E.G. ACK TASK MESSAGE, SEND CHECKPOINT UPDATE, ETC.)
                 try:
-                    input_data = {} 
-                    input_final = {}
-                    input_cursors = {}
-                    input_batch_methods = {}
-                    input_data_ack_msgs = [] 
-                    
-                    for input in inputs:
-                        input_ref = input.ref
-                        input_alias = input.alias or input_ref
-                        input_name = input_alias
-                        input_methods = input.methods 
-    
-                        for method in input_methods:
-                            method_type = method.method
-                            if method_type == "stream":
-                                self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using stream retrieval strategy", method=method.to_dict()) 
-                                input_batch_methods[input_name] = "stream"
-                                batch_size = method.batch_size 
-                                data, input_data_ack_msgs = self._handle_incoming_stream(lattice_id, node_id, input_ref, method) 
-                                input_data[input_name] = data
-                                if len(data) < batch_size:
-                                    input_final[input_name] = True 
-                                else:
-                                    input_final[input_name] = False
-                                break
-                            elif method_type == "sql":
-                                self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using SQL retrieval strategy with method details", database=method.database, table=method.table, sql_type=method.sql_type, batch_size=method.batch_size) 
-                                input_batch_methods[input_name] = "sql" 
-                                batch_idx = checkpoint_metadata.batch_index 
-                                batch_size = method.batch_size
-                                data = self._handle_incoming_sql(method, connections_dict, batch_idx, batch_size)
-                                input_data[input_name] = data
-                                if len(data) < batch_size:
-                                    input_final[input_name] = True
-                                else:
-                                    input_final[input_name] = False
-                                break
-                            elif method_type == "api":
-                                self.residue(self.ash.INFO, f"Fetching data from upstream dependency {input_name} using API retrieval strategy", endpoint=method.endpoint, api_method=method.http_method) 
-                                input_batch_methods[input_name] = "api"
-                                cursor = checkpoint_metadata.batch_cursors.get(input_name) if checkpoint_metadata.batch_cursors else None
-                                data, cursor = self._handle_incoming_api(method, connections_dict, cursor)
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                print(f"Data Fetched for Input {input_name}:", data)
-                                print(f"Cursor for Input {input_name}:", cursor)
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                input_data[input_name] = data
-                                if cursor is None:
-                                    input_final[input_name] = True # THIS IS UNTIL WE IMPLEMENT A CURSOR / PAGINATION
-                                    input_cursors[input_name] = None
-                                else:
-                                    input_final[input_name] = False
-                                    input_cursors[input_name] = cursor
-                                break
-                            else:
-                                self.residue(self.ash.WARNING, f"Unknown retrieval method type: {method_type} for input dependency {input_name}. Skipping this method.")
-                                raise ValueError(f"Unknown retrieval method type: {method_type}")
-                        oxidizer_task = self._update_checkpoint_metadata(oxidizer_task, input_final, input_batch_methods, input_cursors)
+                    self.handle_outgoing_task(msg_id, task, input_data_ack_msgs)
                 except Exception as e:
-                    self.residue(self.ash.CRITICAL, "Error occurred during fetching of input data for the task, such as reading from input streams, executing SQL queries, or making API calls based on the retrieval strategies defined for the inputs in the task message", error=str(e), task=task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id)           
-                    error_details = ErrorDetails(
-                        error_type=type(e).__name__,
-                        error_message=str(e)
-                    )
-                    self._failed_task_msg(oxidizer_task, error_details=error_details) 
-                    return None
-                
-
-                # UPDATE
-                preprocess_end = time.time()
-                oxidizer_task.node_configuration.checkpoint_metadata.accumulated_preprocess_runtime = checkpoint_metadata.accumulated_preprocess_runtime + (preprocess_end - preprocess_start)
-                preprocess_memory_end = memory_usage(-1, interval=.01, timeout=1)
-                oxidizer_task.node_configuration.checkpoint_metadata.accumulated_preprocess_memory = checkpoint_metadata.accumulated_preprocess_memory + (max(preprocess_memory_end) - max(preprocess_memory_end))
+                    self.residue(self.ash.CRITICAL, "Error occurred while handling outgoing task", error=str(e), task=task, node_id=task.node_id, run_id=task.run_id, layer_id=task.layer_id, lattice_id=task.lattice_id) 
+                    error_details = ErrorDetails(error_type=type(e).__name__, error_message=str(e))
+                    self.task_handler.send_failed_task_msg(self.catalyst, task, error_details=error_details)
+                    raise e
                 ##############################################################################
                 
-
-
-
-
-                
-                ##############################################################################
-                ## CUSTOM FUNCTION LOGIC GOES HERE
-                function_start = time.time()
-                function_memory_start = memory_usage(-1, interval=.01, timeout=1)
-                
-                try:
-                    # context = {
-                    #     "task": task,
-                    #     "checkpoint_metadata": checkpoint_metadata,
-                    #     "worker_id": self.oxidizer_consumer_name,
-                    # }
-
-                    context = {
-                        "lattice_id": oxidizer_task.lattice_id,
-                        "run_id": oxidizer_task.run_id,
-                        "layer_id": oxidizer_task.layer_id,
-                        "node_id": oxidizer_task.node_id
-                    }
-                    result = func(input_data, context)
-                    
-                    # Convert to Json
-                    if isinstance(result, (str, int, float, bool)):
-                        result = json.loads(result) 
-                    
-                    
-
-                except Exception as e:
-                    self.residue(self.ash.ERROR, "Error occurred during execution of the user function for the task", error=str(e), node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id) 
-                    error_details = ErrorDetails(
-                        error_type=type(e).__name__,
-                        error_message=str(e)
-                    )
-                    self._failed_task_msg(oxidizer_task, error_details=error_details) 
-                    raise e 
-                
-                function_end = time.time()
-                oxidizer_task.node_configuration.checkpoint_metadata.accumulated_function_runtime = checkpoint_metadata.accumulated_function_runtime + (function_end - function_start)
-                function_memory_end = memory_usage(-1, interval=.01, timeout=1)
-                oxidizer_task.node_configuration.checkpoint_metadata.accumulated_function_memory = checkpoint_metadata.accumulated_function_memory + (max(function_memory_end) - max(function_memory_start))
-                ##############################################################################
-                
-                
-                
-                
-                
-                
-                ##############################################################################
-                # POST PROCESS ACK INPUT DATA MESSAGES
-                postprocess_start = time.time()
-                postprocess_memory_start = memory_usage(-1, interval=.01, timeout=1)
-
-                try:
-                    for ack_msg in input_data_ack_msgs:
-                        self.catalyst.acknowledge_message(*ack_msg) 
-                except Exception as e:
-                    self.residue(self.ash.CRITICAL, "Error occurred while acknowledging messages from input streams after processing input data for the task", error=str(e), task=task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id) 
-                ##############################################################################
-
-                ##############################################################################
-                # POST PROCESS DOWNSTREAM DATA
-                try:
-                    for method in outputs.get("methods", []):
-                        method_type = method.method
-                        if method_type == "stream":
-                            self.residue(self.ash.INFO, f"POST PROCESS: Sending Data Downstream using stream strategy", lattice_id=oxidizer_task.lattice_id, run_id=oxidizer_task.run_id, node_id=oxidizer_task.node_id, **method.to_dict()) 
-                            self._handle_outgoing_stream(oxidizer_task.node_id, result) 
-                        elif method_type == "sql":
-                            self.residue(self.ash.INFO, f"POST PROCESS: Sending Data Downstream using SQL strategy", lattice_id=oxidizer_task.lattice_id, run_id=oxidizer_task.run_id, node_id=oxidizer_task.node_id, **method.to_dict()) 
-                            self._handle_outgoing_sql(method, connections_dict, schema, result, table_description=description) 
-                        elif method_type == "api":
-                            self.residue(self.ash.INFO, f"POST PROCESS: Sending Data Downstream using API strategy", lattice_id=oxidizer_task.lattice_id, run_id=oxidizer_task.run_id, node_id=oxidizer_task.node_id, **method.to_dict()) 
-                            self._handle_outgoing_api(method, connections_dict, result) 
-                        else:
-                            self.residue(self.ash.WARNING, f"POST PROCESS: Unknown Output Method Type: {method_type}. Skipping this method.", lattice_id=oxidizer_task.lattice_id, run_id=oxidizer_task.run_id, node_id=oxidizer_task.node_id, **method.to_dict()) 
-                            raise ValueError(f"Unknown output method type: {method_type}")
-
-                    # POST PROCESS CHECKPOINT MESSAGE TO CONTROLLER STREAM
-                    postprocess_end = time.time()
-                    oxidizer_task.node_configuration.checkpoint_metadata.accumulated_postprocess_runtime = checkpoint_metadata.accumulated_postprocess_runtime + (postprocess_end - postprocess_start)
-                    postprocess_memory_end = memory_usage(-1, interval=.01, timeout=1)
-                    oxidizer_task.node_configuration.checkpoint_metadata.accumulated_postprocess_memory = checkpoint_metadata.accumulated_postprocess_memory + (max(postprocess_memory_end) - max(postprocess_memory_start))
-                    self._checkpoint_task_msg(oxidizer_task)
-                except Exception as e:
-                    self.residue(self.ash.CRITICAL, "POST PROCESS: Error Occurred while handling post-processing tasks", error_type=type(e).__name__, error=str(e), task=oxidizer_task, node_id=oxidizer_task.node_id, run_id=oxidizer_task.run_id, layer_id=oxidizer_task.layer_id, lattice_id=oxidizer_task.lattice_id)          
-                    postprocess_end = time.time()
-                    oxidizer_task.node_configuration.checkpoint_metadata.accumulated_postprocess_runtime = checkpoint_metadata.accumulated_postprocess_runtime + (postprocess_end - postprocess_start)
-                    postprocess_memory_end = memory_usage(-1, interval=.01, timeout=1)
-                    oxidizer_task.node_configuration.checkpoint_metadata.accumulated_postprocess_memory = checkpoint_metadata.accumulated_postprocess_memory + (max(postprocess_memory_end) - max(postprocess_memory_start))
-                    
-                    error_details = ErrorDetails(
-                        error_type=type(e).__name__,
-                        error_message=str(e)
-                    )
-                    self._failed_task_msg(oxidizer_task, error_details=error_details) 
-                ##############################################################################
-                
-
-
                 return result
-
             return wrapper
 
         def auto_run_decorator(func):
-            if self.auto_react:
-                while True:
-                    wrapped = decorator(func)
-                    wrapped()
-                    return wrapped
-            else: 
-                wrapped = decorator(func)
-                wrapped()
-                return wrapped
-
+            wrapped = decorator(func)
+            wrapped()
+            return wrapped
+                
         return auto_run_decorator
 
             

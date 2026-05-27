@@ -37,6 +37,13 @@ class OxidizerDefaults:
 DEFAULTS = OxidizerDefaults()
 
 
+@dataclass 
+class InputTrigger: 
+    type: str
+    attribute: str
+    connection: dict = None # UPDATE WITH DIFFERENT CONNECTION TYPES
+
+
 @dataclass
 class InputStreamMethod:
     method: str
@@ -99,8 +106,9 @@ class InputSQLMethod:
 class InputAPIMethod:
     method: str
     connection: dict # UPDATE WITH DIFFERENT CONNECTION TYPES
-    endpoint: str
     http_method: str
+    endpoint: str = None # Endpoint or Input Endpoint - One is Required 
+    input_trigger: InputTrigger = None # For dynamic endpoint construction based on input data, e.g. {"template": "/api/data/{id}", "params": ["id"]}
     payload_template: dict = None
     path: str = None # JSON path to extract relevant data from API response
     paginator: str = None # JSON path to extract the next page URL from API response
@@ -113,6 +121,37 @@ class InputAPIMethod:
             dict: A dictionary representation of the dataclass.
         """
         return asdict(self)
+
+
+@dataclass
+class InputFetchContext:
+    """
+    Per-call context passed to every ReagentInputHandler.handle_incoming_* method.
+
+    Stream Routing fields are only read by handle_incoming_stream; the other handlers ignore them.
+    Checkpoint State and Input Trigger fields are only read by the relevant handler.
+    """
+    # Stream Routing
+    lattice_id: str = None
+    node_id: str = None
+    input_ref: str = None
+    # Checkpoint State
+    batch_index: int = 0
+    cursor: str = None
+    # Input Trigger
+    trigger_data: dict = None
+    trigger_attribute: str = None
+
+
+@dataclass
+class InputFetchResult:
+    """
+    Unified return type for all ReagentInputHandler.handle_incoming_* methods.
+    """
+    data: list
+    is_final: bool
+    ack_msgs: list = field(default_factory=list)  # empty for sql / api
+    next_cursor: str = None                        # non-None only for api
 
 
 @dataclass
@@ -203,6 +242,9 @@ class OutputAPIMethod:
         return asdict(self)
 
 
+@dataclass
+class OutputsConfiguration:
+    methods: List[OutputStreamMethod | OutputSQLMethod | OutputAPIMethod] = field(default_factory=list)
 
 
 @dataclass
@@ -264,7 +306,7 @@ class NodeConfiguration:
     on_failure: str = "stop" # continue | stop | retry
     inputs: List[InputConfiguration] = field(default_factory=list)
     schema: List[SchemaField] = field(default_factory=list)
-    outputs: List[OutputStreamMethod | OutputSQLMethod | OutputAPIMethod] = field(default_factory=list)
+    outputs: OutputsConfiguration = field(default_factory=OutputsConfiguration)
     checkpoint_metadata: CheckpointMetadata = field(default_factory=CheckpointMetadata)
     error_details: ErrorDetails = None
 
@@ -385,8 +427,8 @@ class TaskMessage:
     run_id: str
     layer_id: str
     node_id: str
-    worker_id: str  = "worker-" + socket.gethostname() + "-" + str(uuid.uuid4())
-    timestamp: float = time.time()
+    worker_id: str   = field(default_factory=lambda: f"worker-{socket.gethostname()}-{uuid.uuid4()}")
+    timestamp: float = field(default_factory=time.time)
     node_configuration: NodeConfiguration = None
     connections: List[APIConnection | GlueCatalogConnection | DuckLakeConnection | SQSConnection] = field(default_factory=list)
 
@@ -426,7 +468,13 @@ class TaskMessage:
                             elif method_type == "sql":
                                 input_methods.append(InputSQLMethod(**method))
                             elif method_type == "api":
+                                if method.get("input_trigger"):
+                                    trigger_details = {"type": method["input_trigger"]["type"], "attribute": method["input_trigger"]["attribute"]}
+                                    input_trigger = InputTrigger(**trigger_details)
+                                    method["input_trigger"] = input_trigger
                                 input_methods.append(InputAPIMethod(**method))
+                            elif method_type == "sqs":
+                                input_methods.append(InputSQSMethod(**method))
                         input["methods"] = input_methods
                     inputs.append(InputConfiguration(**input))
                 data["node_configuration"]["inputs"] = inputs
@@ -447,7 +495,7 @@ class TaskMessage:
                             output_methods.append(OutputSQLMethod(**method))
                         elif method_type == "api":
                             output_methods.append(OutputAPIMethod(**method))
-                    data["node_configuration"]["outputs"]["methods"] = output_methods
+                    data["node_configuration"]["outputs"] = OutputsConfiguration(methods=output_methods)
 
 
             # CHECKPOINT METADATA

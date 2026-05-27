@@ -7,6 +7,7 @@ import json
 
 from oxidizer_lite.phase import DuckLakeConnection, GlueCatalogConnection
 from oxidizer_lite.residue import Residue, Ash
+from oxidizer_lite.catalyst import Catalyst
 
  
 
@@ -369,12 +370,9 @@ class SQLEngine(Residue):
         Returns:
             str: The constructed SQL INSERT query string.
         """
-        if self.catalog_type == "glue_catalog":
-            sql = f"INSERT INTO {self.catalog}.{database}.{table_name} SELECT * FROM {source_table}"
-        elif self.catalog_type == "ducklake":
-            sql = f"INSERT INTO {self.catalog}.{database}.{table_name} SELECT * FROM {source_table}"
-        else:
+        if self.catalog_type not in ("glue_catalog", "ducklake"):
             raise ValueError(f"Unsupported Catalog Type: {self.catalog_type}")
+        sql = f"INSERT INTO {self.catalog}.{database}.{table_name} SELECT * FROM {source_table}"
         self.residue(self.ash.INFO, f"Insert query built for {self.catalog}.{database}.{table_name} from source {source_table}")
         return sql
         
@@ -795,9 +793,6 @@ class SQSEngine(Residue):
         """
         super().__init__(component_name="sqs_engine")
         self.connection_details = connection_details
-        print("++++++++++++++")
-        print("Initialized SQSEngine with connection details:", self.connection_details)
-        print("++++++++++++++")
     def sqs_auth(self):
         """
         Authenticates with the AWS SQS service.
@@ -866,7 +861,7 @@ class APIEngine(Residue):
                 raise ValueError(f"Unsupported authentication type: {auth_details['auth_type']}")
 
 
-    def get(self, endpoint, params=None, cursor=None):
+    def get(self, url, params=None):
         """
         Makes a GET request to the specified API endpoint with optional query parameters.
         
@@ -877,10 +872,6 @@ class APIEngine(Residue):
         Returns:
             dict: JSON response from the API.
         """
-        if cursor is not None:
-            url = cursor  # Use the cursor URL directly for pagination if provided
-        else:
-            url = f"{self.base_url}{endpoint}" 
         response = self.session.get(url, params=params)
         return self._handle_response(response)
 
@@ -1013,3 +1004,42 @@ class AnthropicEngine(Residue):
             dict: The model response.
         """
         pass
+
+
+class StreamEngine(Residue):
+    def __init__(self, catalyst: Catalyst, consumer_name: str):
+        """
+        Initializes the StreamEngine with a Catalyst instance and consumer name.
+
+        Args:
+            catalyst (Catalyst): The Catalyst instance used to interact with the Redis stream.
+            consumer_name (str): The unique consumer name for this worker within the consumer group.
+        """
+        super().__init__(component_name="stream_engine")
+        self.catalyst = catalyst
+        self.consumer_name = consumer_name
+
+    def read(self, stream: str, consumer_group: str, count: int, block: int) -> tuple[list, list]:
+        """
+        Reads messages from a Redis stream consumer group.
+
+        Args:
+            stream (str): The Redis stream key to read from.
+            consumer_group (str): The consumer group name.
+            count (int): Maximum number of messages to read.
+            block (int): Milliseconds to block waiting for new messages.
+
+        Returns:
+            tuple: (data, ack_msgs) where data is a list of message dicts and
+                   ack_msgs is a list of (stream, consumer_group, msg_id) tuples
+                   to acknowledge after successful processing.
+        """
+        self.catalyst.create_consumer_group(stream, consumer_group)
+        raw_data = self.catalyst.read_from_stream(
+            stream, consumer_group, self.consumer_name, count=count, block=block
+        )
+        data, ack_msgs = [], []
+        for msg_id, msg in raw_data:
+            ack_msgs.append((stream, consumer_group, msg_id))
+            data.append(msg)
+        return data, ack_msgs

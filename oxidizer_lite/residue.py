@@ -3,7 +3,18 @@ import json
 import logging
 import time
 from enum import Enum
+from importlib.metadata import version, PackageNotFoundError
 
+try:
+    _version = version("oxidizer-lite")
+except PackageNotFoundError:
+    _version = "unknown"
+
+
+
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+)
 
 class Ash(Enum):
     """
@@ -101,19 +112,19 @@ class Residue:
             else:
                 catalyst.client.json().arrappend(key, ".", entry)
             catalyst.set_ttl(key, self.LOG_TTL)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning("Redis log write failed", error=str(e))
 
     def oxidizer_ascii_art(self):
         """Prints the Oxidizer ASCII art banner with the current version."""
-        art = r"""
+        art = f"""
          ██████  ██   ██ ██ ██████  ██ ██████ ███████ ██████  
         ██    ██  ██ ██  ██ ██   ██ ██    ██  ██      ██   ██ 
         ██    ██   ███   ██ ██   ██ ██   ██   █████   ██████  
         ██    ██  ██ ██  ██ ██   ██ ██  ██    ██      ██   ██ 
          ██████  ██   ██ ██ ██████  ██ ██████ ███████ ██   ██
          
-         Version: 0.1.0
+         Version: {_version}
         """
-        # FUTURE: How Can We the version pull dynamically?
+        # version resolved via importlib.metadata at import time
         print(art)
