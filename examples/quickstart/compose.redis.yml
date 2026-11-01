@@ -1,0 +1,84 @@
+name: oxidizer-quickstart
+
+x-oxidizer: &oxidizer
+  image: oxidizer-quickstart:local
+  environment:
+    PYTHONPYCACHEPREFIX: /tmp/quickstart-python-cache
+  build:
+    context: ../..
+    dockerfile: docker/oxidizer-lite.dockerfile
+    target: runtime
+  volumes:
+    - .:/example:ro
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: oxidizer-quickstart-rustfs
+    networks:
+      default:
+        aliases: [oxidizer-quickstart-rustfs.test]
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_VOLUMES: /data
+
+  redis:
+    image: redis:7-alpine
+    container_name: oxidizer-quickstart-redis
+    networks:
+      default:
+        aliases: [oxidizer-quickstart-redis.test]
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  seed:
+    <<: *oxidizer
+    volumes:
+      - .:/example
+    command: ["python", "/example/seed.py", "--config", "/example/runtime.redis.yml"]
+    depends_on:
+      rustfs:
+        condition: service_started
+
+  api:
+    <<: *oxidizer
+    image: oxidizer-quickstart-api:local
+    build:
+      context: ../..
+      dockerfile: docker/oxidizer-lite.dockerfile
+      target: api
+    command: ["python", "-m", "app.api", "--config", "/example/runtime.redis.yml", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8027:8000"
+    depends_on:
+      rustfs:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  controller:
+    <<: *oxidizer
+    command: ["python", "-m", "app.controller", "--config", "/example/runtime.redis.yml"]
+    depends_on:
+      rustfs:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *oxidizer
+    command: ["python", "-m", "app.worker", "--config", "/example/runtime.redis.yml"]
+    mem_limit: 7g
+    cpus: 4
+    depends_on:
+      rustfs:
+        condition: service_started
+      redis:
+        condition: service_healthy

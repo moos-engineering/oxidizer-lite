@@ -1,0 +1,44 @@
+templateVersion: 1
+name: quickstart_observations_redis
+type: workflow
+workflow:
+  layers:
+    - name: bronze
+      nodes:
+        - name: raw_observations
+          type: scheduled
+          inputs:
+            - alias: observations
+              methods:
+                - method: s3
+                  connection: quickstart_files
+                  s3_path: quickstart/observations.parquet
+                  format: parquet
+                  order_by: [entity_id, observed_at]
+                  batch_size: 200000
+          outputs:
+            methods:
+              - method: stream
+              - method: s3_tables
+                connection: quickstart_lake
+                schema: quickstart_observation_upsert
+                catalog: local_catalog
+                namespace: analytics
+                table: quickstart_observation_upsert
+    - name: silver
+      nodes:
+        - name: transform_observation_history
+          inputs:
+            - ref: quickstart_observations_redis.bronze.raw_observations
+              alias: observations
+              methods:
+                - method: stream
+                  batch_size: 200000
+          outputs:
+            methods:
+              - method: s3_tables
+                connection: quickstart_lake
+                schema: quickstart_observation_history
+                catalog: local_catalog
+                namespace: analytics
+                table: quickstart_observation_history

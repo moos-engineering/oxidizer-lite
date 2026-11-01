@@ -1,0 +1,12 @@
+templateVersion: 1
+name: quickstart_files
+type: connection
+connection:
+  type: s3
+  provider: rustfs
+  bucket: quickstart-data
+  endpoint_url: http://oxidizer-quickstart-rustfs.test:9000
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  addressing_style: path

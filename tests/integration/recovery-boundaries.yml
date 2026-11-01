@@ -1,0 +1,20 @@
+# External mode leaves a uniquely named namespace/table in its Iceberg warehouse.
+# Use isolated local services for this checkout, or switch to testcontainers.
+mode: external
+
+credentials:
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+
+external:
+  redis_url: redis://localhost:6379/15
+  rustfs_endpoint: http://localhost:9000
+  table_bucket: oxidizer-tables-test
+
+testcontainers:
+  redis_image: redis:7-alpine
+  rustfs_image: rustfs/rustfs:latest
+  rustfs_port: 9000
+  access_key_env: RUSTFS_ACCESS_KEY
+  secret_key_env: RUSTFS_SECRET_KEY
+  table_bucket_prefix: oxidizer-recovery

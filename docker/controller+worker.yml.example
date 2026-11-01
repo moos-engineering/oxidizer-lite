@@ -1,0 +1,31 @@
+formula:
+  provider: s3
+  bucket: oxidizer-test
+  prefix: oxidizer
+  endpoint_url: http://rustfs:9000
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  addressing_style: path
+
+catalyst:
+  provider: redis
+  url: redis://redis:6379/0
+  # For Kafka, replace these with provider: kafka, bootstrap_servers, and group_id.
+
+controller:
+  idle_poll_seconds: 1
+  log_level: debug
+
+worker:
+  task_stream: oxidizer:reagent
+  idle_poll_seconds: 0.5
+  log_level: debug
+  custom_functions_file: /path/to/custom.py
+  custom_functions_router: my_custom_router # pass task details so they can be used in custom router (data & context)
+
+# This is a special worker with a dedicated task_stream - think of gpu instances or special instances
+special-worker:
+  task_stream: oxidizer:reagent:special-worker
+  idle_poll_seconds: 0.5
+  log_level: info

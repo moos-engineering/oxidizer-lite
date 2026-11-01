@@ -1,0 +1,32 @@
+templateVersion: 1
+name: quickstart_observation_history
+type: schema
+schema:
+  version: 1
+  description: SCD2 versions of each entity's observations.
+  columns:
+    - {name: entity_id, type: string, nullable: false}
+    - {name: observed_at, type: timestamp, nullable: false}
+    - {name: source_revision, type: timestamp, nullable: false}
+    - {name: metric_value, type: double, nullable: false}
+    - {name: status, type: string, nullable: false}
+    - {name: reading, type: int64, nullable: false}
+    - {name: valid_from, type: timestamp, nullable: false}
+    - {name: valid_to, type: timestamp, nullable: true}
+    - {name: is_current, type: boolean, nullable: false}
+    - {name: record_hash, type: string, nullable: false}
+  keys: [entity_id]
+  write:
+    operation: scd2
+    late_arrivals: ignore
+    ordering:
+      column: observed_at
+      direction: ascending
+    history:
+      valid_from: valid_from
+      valid_to: valid_to
+      current_flag: is_current
+      record_hash: record_hash
+      open_ended_value: null
+    compare:
+      columns: [metric_value, status, reading]
