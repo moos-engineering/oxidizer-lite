@@ -216,7 +216,14 @@ container start mock-worker
 
 Confirm dependency health before starting roles. Named volumes survive container deletion. Deleting a volume permanently removes its data; deleting RustFS objects alone can leave stale Iceberg catalog registrations. Do not delete either as an automatic recovery step.
 
-For an explicitly authorized destructive reset, see [the root setup guide](../SETUP.md#stop-restart-and-reset). Redis `FLUSHDB` destroys keys, streams, consumer groups, and state in the selected database; `FLUSHALL` affects every database. Neither is a routine diagnostic action. After an approved reset, repeat seeding and table enablement as appropriate.
+For an explicitly authorized destructive reset of the Docker Compose quickstart,
+see [Stop Or Start Over](../examples/quickstart/README.md#stop-or-start-over).
+That procedure applies only to the quickstart Compose project, not the Apple
+containers above or a production deployment. For production, follow
+[Production Recovery](operations/production-recovery.md).
+Redis `FLUSHDB` destroys keys, streams, consumer groups, and state in the selected
+database; `FLUSHALL` affects every database. Neither is a routine diagnostic
+action. After an approved reset, repeat seeding and table enablement as appropriate.
 
 ## References
 

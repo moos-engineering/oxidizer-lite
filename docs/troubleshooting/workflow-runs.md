@@ -100,7 +100,9 @@ the peak during work; an RSS rise alone does not prove live objects are retained
 Checkpoint `peak_*_memory_bytes` fields are cgroup phase peaks, not isolated
 allocations owned by a node. The optional `MALLOC_ARENA_MAX=2` limits glibc arenas
 on Linux; it is not a memory cap and does not control DuckDB or Arrow allocators.
-See [SETUP.md](../../SETUP.md) for the local workload validation and caveats.
+See [Worker Memory And CPU-Aware Arena Tuning](../local-setup.md#worker-memory-and-cpu-aware-arena-tuning)
+for tuning guidance and [Verify A Run](../local-setup.md#verify-a-run) for local
+workload verification.
 
 Do not add forced garbage collection or allocator purge calls as a first response.
 If memory approaches the container limit, stop submitting new load, preserve the
