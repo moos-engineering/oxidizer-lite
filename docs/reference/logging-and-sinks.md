@@ -40,7 +40,7 @@ Prefer role YAML settings in container deployments and explicit Python parameter
 | `Residue(capture_events=True)` | Opts a trace into in-memory event capture. Bound child traces share its event buffer. |
 | `Residue(log_level="DEBUG")` | Enables DEBUG and higher-severity events for this trace and its bound children, including console, capture, and attached sinks. |
 | `Residue.dump()` | Returns the captured events and clears the buffer. The caller chooses when and where to publish them. |
-| `Residue.add_sink(sink)` | Attaches a sink to a trace; bound child Residues share the sink list. Duplicate sinks with the same type/connection identity are ignored. |
+| `Residue.add_sink(sink)` | Attaches a sink to a trace; bound child Residues share the sink list. Sinks with a non-`None` connection and the same type/connection identity are deduplicated; connectionless sinks are attached independently. |
 | `Oxidizer(..., sinks=[...])` | Explicitly attaches the provided sinks to its shared root trace before binding Formula and Catalyst. |
 
 For persisted logs, construct `RedisStreamLogSink` with an existing `RedisConnection` and pass it in `Oxidizer(sinks=...)`, or attach it to a shared `Residue` passed to the components. Sink construction and attachment are explicit.

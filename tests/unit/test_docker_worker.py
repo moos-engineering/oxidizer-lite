@@ -29,7 +29,7 @@ def test_redis_connection_uses_tls_from_rediss_url():
 	assert "ssl_cert_reqs" not in pool.connection_kwargs
 
 
-def test_mcp_extra_groups_api_search_and_microscope_dependencies():
+def test_mcp_extra_groups_only_api_and_search_dependencies():
 	from pathlib import Path
 
 	import tomllib
@@ -41,6 +41,11 @@ def test_mcp_extra_groups_api_search_and_microscope_dependencies():
 	assert "search" not in extras
 	assert "microscope" not in extras
 	assert {Requirement(requirement).name for requirement in extras["mcp"]} == {
-		"fastapi", "fastmcp", "uvicorn", "lancedb", "fastembed", "langchain",
-		"langchain-openai", "langchain-ollama", "ollama",
+		"fastapi", "fastmcp", "uvicorn", "lancedb", "fastembed",
 	}
+	for requirements in extras.values():
+		assert not any(
+			Requirement(requirement).name == "ollama"
+			or Requirement(requirement).name.startswith("langchain")
+			for requirement in requirements
+		)

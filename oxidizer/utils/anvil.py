@@ -86,23 +86,28 @@ class Anvil:
 			key_value = credentials.get("key_value")
 			if not key_name or key_value is None:
 				raise ValueError("API-key authentication requires key_name and key_value")
+			self._validate_authentication_header(key_name, key_value)
 			self.session.headers.update({key_name: key_value})
 		elif auth_type == "headers":
 			headers = credentials.get("headers")
 			if not isinstance(headers, dict) or not headers:
 				raise ValueError("Header authentication requires a non-empty credentials.headers mapping")
-			reserved = {"connection", "content-length", "host", "proxy-authorization", "transfer-encoding"}
 			for name, value in headers.items():
-				if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
-					raise ValueError("Authentication header names must be valid HTTP tokens")
-				if name.lower() in reserved:
-					raise ValueError(f"Authentication header {name!r} cannot override a transport header")
-				if not isinstance(value, str) or not value or any(character in value for character in ("\r", "\n")):
-					raise ValueError("Authentication header values must be non-empty strings without line breaks")
+				self._validate_authentication_header(name, value)
 			self.session.headers.update(headers)
 		else:
 			raise ValueError(f"Unsupported authentication type: {auth_type}")
 		self.residue.emit(Ash.INFO, "Configured API authentication", auth_type=auth_type)
+
+	@staticmethod
+	def _validate_authentication_header(name: object, value: object) -> None:
+		reserved = {"connection", "content-length", "host", "proxy-authorization", "transfer-encoding"}
+		if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+			raise ValueError("Authentication header names must be valid HTTP tokens")
+		if name.lower() in reserved:
+			raise ValueError(f"Authentication header {name!r} cannot override a transport header")
+		if not isinstance(value, str) or not value or any(character in value for character in ("\r", "\n")):
+			raise ValueError("Authentication header values must be non-empty strings without line breaks")
 
 	def _url(self, endpoint: str) -> str:
 		"""Resolve an HTTP endpoint and enforce the configured base origin.

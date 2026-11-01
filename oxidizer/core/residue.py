@@ -272,11 +272,11 @@ class Residue:
         )
 
     def add_sink(self, sink) -> None:
-        """Attach a sink once to this trace and all bound child traces.
+        """Attach a sink to this trace and all bound child traces.
 
-        Sinks exposing a ``connection`` attribute are deduplicated by sink type
-        and connection identity. This avoids duplicate event writes when
-        components share the same backend connection.
+        Sinks exposing a non-None ``connection`` are deduplicated by sink type
+        and connection identity. Connectionless sinks are attached independently.
+        This avoids duplicate event writes when components share a backend.
 
         Args:
             sink: Object exposing ``emit(event_dict)``; ``flush()`` is optional.
@@ -286,7 +286,8 @@ class Residue:
             sink._oxidizer_connection_id = id(connection)
         for existing_sink in self.sinks:
             if (
-                type(existing_sink) is type(sink)
+                connection is not None
+                and type(existing_sink) is type(sink)
                 and getattr(existing_sink, "_oxidizer_connection_id", None) == getattr(sink, "_oxidizer_connection_id", None)
             ):
                 return

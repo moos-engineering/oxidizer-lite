@@ -82,7 +82,7 @@ def test_redis_bulk_write_chunks_and_preserves_payloads(count, chunk_sizes):
 
     client = FakeRedisPipelineClient()
     adapter = RedisCatalyst(SimpleNamespace(client=client), Residue())
-    messages = ([{"id": 1}, [2], "text", 3, None] * 401)[:count]
+    messages = ([{"id": 1}, [2], {"value": "text"}, [3], {"value": None}] * 401)[:count]
 
     ids = adapter.write_many_to_stream("output", messages, emit_log=False)
 
@@ -90,7 +90,7 @@ def test_redis_bulk_write_chunks_and_preserves_payloads(count, chunk_sizes):
     assert client.transactions == [False] * len(chunk_sizes)
     assert ids == [f"{index}-0" for index in range(count)]
     assert [entry for batch in client.batches for entry in batch] == [
-        ("output", {"message": json.dumps(message) if isinstance(message, (dict, list)) else str(message)})
+        ("output", {"message": json.dumps(message)})
         for message in messages
     ]
 

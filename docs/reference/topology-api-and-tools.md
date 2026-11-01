@@ -343,7 +343,7 @@ reports `documentation_search_unavailable` or `documentation_search_failed` as
 an MCP tool error, without backend paths or exception details. `read_doc` and
 the other inspection tools remain usable when search is unavailable.
 `/api/health` remains process liveness only; it does not imply search readiness.
-The `[mcp]` extra includes REST/MCP, vector-search, and Microscope dependencies,
+The `[mcp]` extra includes REST/MCP and vector-search dependencies,
 but installing it alone does not build model/index assets. For source development,
 install `[mcp]` and explicitly build the assets as described in the
 [image guide](../../docker/README.md#source-development).

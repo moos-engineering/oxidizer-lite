@@ -5,7 +5,7 @@ Build two images from the same source revision or published package version:
 | Target | Contents | Published tag pattern |
 | --- | --- | --- |
 | `runtime` (default) | Controller, worker, S3/Redis/Kafka/API/Iceberg adapters. No FastMCP, LanceDB, or embedding model. | `<version>`, `latest` |
-| `api` | Shared runtime dependencies plus the `mcp` extra: REST/MCP, Microscope/LangChain/Ollama clients, LanceDB, a local FastEmbed model, and version-matched documentation embeddings. | `<version>-api`, `latest-api` |
+| `api` | Shared runtime dependencies plus the `mcp` extra: REST/MCP, LanceDB, a local FastEmbed model, and version-matched documentation embeddings. | `<version>-api`, `latest-api` |
 
 Use the runtime image for controller/worker/seed roles and the API image for
 Topology. Both use the same mounted runtime YAML and existing Formula/Catalyst
@@ -14,9 +14,7 @@ The API image can be larger because it carries ONNX Runtime and model assets.
 The runtime has no FastMCP, LanceDB, FastEmbed, ONNX Runtime, LangChain, or Ollama
 dependencies. Its remaining footprint is primarily Python/the OS base and the
 PyArrow, DuckDB, and AWS/Kafka libraries needed for its storage/transport adapters.
-Microscope's Python module is part of the package, but its optional dependencies
-are installed only by the API image's `mcp` extra. Ollama is a client library;
-this image does not bundle an Ollama server or a generative language model.
+Neither image bundles an Ollama server or a generative language model.
 
 ## Local Builds
 
@@ -103,5 +101,5 @@ for another location and assign it to `topology.documentation`. Building needs
 network access; serving does not. Rebuild into a new empty directory after
 updating docs or dependencies. The runtime package does not import semantic
 dependencies unless Chisel initializes search or builds an index.
-The `mcp` extra includes search and Microscope dependencies together; there are
-no separate `search` or `microscope` extras.
+The `mcp` extra includes REST/MCP and search dependencies; there is no separate
+`search` extra.

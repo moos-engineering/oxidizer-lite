@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from oxidizer import RedisStreamLogSink, Residue
 
 
@@ -19,6 +21,61 @@ class FakeRedisClient:
 class FakeRedisConnection:
     def __init__(self, client):
         self.client = client
+
+
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_connectionless_sinks_both_receive_child_events_and_flush(explicit_none):
+    class MemorySink:
+        def __init__(self):
+            self.events = []
+            self.flushed = False
+            if explicit_none:
+                self.connection = None
+
+        def emit(self, event):
+            self.events.append(event)
+
+        def flush(self):
+            self.flushed = True
+
+    residue = Residue()
+    child = residue.bind(component_name="worker")
+    first, second = MemorySink(), MemorySink()
+    residue.add_sink(first)
+    child.add_sink(second)
+    child.emit(child.ash.INFO, "worker event")
+    residue.flush()
+
+    assert residue.sinks == [first, second]
+    assert child.sinks is residue.sinks
+    assert len(first.events) == len(second.events) == 1
+    assert first.events == second.events
+    assert first.events[0]["event"] == "worker event"
+    assert first.flushed and second.flushed
+
+
+def test_connection_backed_sinks_deduplicate_only_same_type_and_connection():
+    first_client, second_client = FakeRedisClient(), FakeRedisClient()
+    first_connection = FakeRedisConnection(first_client)
+    second_connection = FakeRedisConnection(second_client)
+    residue = Residue()
+    child = residue.bind(component_name="worker")
+    first = RedisStreamLogSink(connection=first_connection)
+    second = RedisStreamLogSink(connection=second_connection)
+
+    class OtherRedisSink(RedisStreamLogSink):
+        pass
+
+    other = OtherRedisSink(connection=first_connection)
+    residue.add_sink(first)
+    child.add_sink(RedisStreamLogSink(connection=first_connection))
+    child.add_sink(second)
+    child.add_sink(other)
+    child.emit(child.ash.INFO, "worker event")
+
+    assert residue.sinks == [first, second, other]
+    assert len(first_client.entries) == 2
+    assert len(second_client.entries) == 1
 
 
 def test_redis_stream_log_sink_writes_to_existing_connection():

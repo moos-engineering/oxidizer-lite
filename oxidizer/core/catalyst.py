@@ -1,8 +1,16 @@
 import json
+from typing import Any
 
 from .lattice import RedisConnection, KafkaConnection
 from .residue import Residue
 
+
+type StreamPayload = dict[str, Any] | list[Any]
+
+
+def _validate_payload(message: object) -> None:
+    if not isinstance(message, (dict, list)):
+        raise TypeError("Catalyst stream payload must be a dictionary or list")
 
 
 class RedisCatalyst:
@@ -96,22 +104,26 @@ class RedisCatalyst:
         )
         return
 
-    def write_to_stream(self, topic_name: str, message: str, *, emit_log: bool = True):
+    def write_to_stream(self, topic_name: str, message: StreamPayload, *, emit_log: bool = True):
         """Append one value to a Redis Stream.
 
-        Mappings and lists are JSON-encoded; scalar values are stringified.
+        Dictionaries and lists are JSON-encoded; other payload types are rejected.
         The payload is stored under the ``message`` field used by Catalyst's
         read path.
 
         Args:
             topic_name: Stream key to append to.
-            message: Mapping, list, or scalar payload.
+            message: JSON-serializable dictionary or list.
             emit_log: Whether to emit a Catalyst debug event for this write.
 
         Returns:
             Redis-generated stream entry ID.
+
+        Raises:
+            TypeError: If the payload is not a dictionary/list or cannot be JSON-encoded.
         """
-        data = {"message": json.dumps(message) if isinstance(message, (dict, list)) else str(message)} # Ensure all values are strings or JSON-encoded
+        _validate_payload(message)
+        data = {"message": json.dumps(message)}
         msg_id = self.connection.client.xadd(topic_name, data)
         if emit_log:
             self.residue.emit(
@@ -123,17 +135,20 @@ class RedisCatalyst:
             )
         return msg_id
 
-    def write_many_to_stream(self, topic_name: str, messages: list, *, emit_log: bool = True) -> list:
+    def write_many_to_stream(self, topic_name: str, messages: list[StreamPayload], *, emit_log: bool = True) -> list:
         """Append ordered entries in non-atomic pipelines of at most 1,000 records.
 
         Errors propagate; earlier entries or chunks may already have been
         written, so retry can duplicate output just as with single writes.
+        All top-level payload types are validated before publishing any entries.
         """
+        for message in messages:
+            _validate_payload(message)
         message_ids = []
         for offset in range(0, len(messages), 1000):
             with self.connection.client.pipeline(transaction=False) as pipeline:
                 for message in messages[offset:offset + 1000]:
-                    payload = json.dumps(message) if isinstance(message, (dict, list)) else str(message)
+                    payload = json.dumps(message)
                     pipeline.xadd(topic_name, {"message": payload})
                 message_ids.extend(pipeline.execute())
         if emit_log and messages:
@@ -430,21 +445,25 @@ class KafkaCatalyst:
         )
         return
 
-    def write_to_stream(self, topic_name: str, message: str, *, emit_log: bool = True):
+    def write_to_stream(self, topic_name: str, message: StreamPayload, *, emit_log: bool = True):
         """Produce one record and synchronously flush the producer.
 
-        Mappings and lists are JSON-encoded; scalar values are stringified.
+        Dictionaries and lists are JSON-encoded; other payload types are rejected.
 
         Args:
             topic_name: Kafka topic to produce to.
-            message: Mapping, list, or scalar payload.
+            message: JSON-serializable dictionary or list.
             emit_log: Whether to emit a Catalyst debug event for this write.
 
         Returns:
             ``None``; Kafka's producer API does not return a stream entry ID.
+
+        Raises:
+            TypeError: If the payload is not a dictionary/list or cannot be JSON-encoded.
         """
+        _validate_payload(message)
         topic_name = self._topic_name(topic_name)
-        value = json.dumps(message) if isinstance(message, (dict, list)) else str(message)
+        value = json.dumps(message)
         self.connection.producer.produce(topic_name, value=value)
         self.connection.producer.flush()
         if emit_log:
@@ -456,15 +475,21 @@ class KafkaCatalyst:
             )
         return
 
-    def write_many_to_stream(self, topic_name: str, messages: list, *, emit_log: bool = True) -> list:
-        """Publish bounded batches and return one placeholder per Kafka record."""
+    def write_many_to_stream(self, topic_name: str, messages: list[StreamPayload], *, emit_log: bool = True) -> list:
+        """Publish bounded batches and return one placeholder per Kafka record.
+
+        All top-level payload types are validated before publishing any records.
+        Serialization or broker errors can still leave earlier records published.
+        """
+        for message in messages:
+            _validate_payload(message)
         if not messages:
             return []
         topic_name = self._topic_name(topic_name)
         producer = self.connection.producer
         for start in range(0, len(messages), 5000):
             for message in messages[start:start + 5000]:
-                value = json.dumps(message) if isinstance(message, (dict, list)) else str(message)
+                value = json.dumps(message)
                 while True:
                     try:
                         producer.produce(topic_name, value=value)
@@ -710,31 +735,38 @@ class Catalyst:
         self.catalyst.create_consumer_group(topic_name, group_name, start_id=start_id)
         return
 
-    def write_to_stream(self, topic_name: str, message: str, *, emit_log: bool = True):
+    def write_to_stream(self, topic_name: str, message: StreamPayload, *, emit_log: bool = True):
         """
-        Write one payload to a Redis stream or Kafka topic. Mappings and lists
-        are JSON-encoded; scalar values are stringified by the backend.
+        Write one JSON-serializable dictionary or list to a Redis stream or
+        Kafka topic. Other top-level payload types are rejected.
         
         Args:
             topic_name (str): The name of the Redis stream / Kafka topic.
-            message (str): Payload to encode and publish.
+            message: JSON-serializable dictionary or list to encode and publish.
             emit_log (bool): Whether to emit a Catalyst debug event.
         
         Returns:
             Redis stream entry ID, or ``None`` for Kafka, whose producer does
             not return an entry ID through this interface.
+
+        Raises:
+            TypeError: If the payload is not a dictionary/list or cannot be JSON-encoded.
         """
         msg_id = self.catalyst.write_to_stream(topic_name, message, emit_log=emit_log)
         return msg_id
 
-    def write_many_to_stream(self, topic_name: str, messages: list, *, emit_log: bool = True) -> list:
+    def write_many_to_stream(self, topic_name: str, messages: list[StreamPayload], *, emit_log: bool = True) -> list:
         """Publish ordered records, using bounded pipelines for Redis.
 
-        Backends without bulk publishing retain single-write behavior.
+        Each payload must be a JSON-serializable dictionary or list.
+        Backends without bulk publishing retain single-write behavior, but all
+        top-level payload types are validated before any fallback writes.
         """
         write_many = getattr(self.catalyst, "write_many_to_stream", None)
         if callable(write_many):
             return write_many(topic_name, messages, emit_log=emit_log)
+        for message in messages:
+            _validate_payload(message)
         return [self.write_to_stream(topic_name, message, emit_log=emit_log) for message in messages]
 
     def read_from_stream(self, topic_name: str, group_name: str, consumer_name: str, count=1, block=1000, stream_id=">"):

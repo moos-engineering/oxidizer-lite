@@ -98,6 +98,36 @@ def test_anvil_rejects_invalid_authentication_headers(headers):
 		}}, session=FakeSession())
 
 
+@pytest.mark.parametrize("name,value", [
+	("X-Api-Key\r\nInjected", "secret"),
+	("X Api Key", "secret"),
+	(123, "secret"),
+	("X-Api-Key", "secret\rInjected: yes"),
+	("X-Api-Key", "secret\nInjected: yes"),
+	("X-Api-Key", ""),
+	("X-Api-Key", 123),
+	("X-Api-Key", None),
+	("hOsT", "other.example"),
+	("Content-Length", "0"),
+	("Connection", "close"),
+	("Proxy-Authorization", "secret"),
+	("Transfer-Encoding", "chunked"),
+])
+@pytest.mark.parametrize("auth_type", ["api_key", "headers"])
+def test_anvil_validates_auth_headers_before_installing_them(name, value, auth_type):
+	session = FakeSession()
+	credentials = (
+		{"key_name": name, "key_value": value}
+		if auth_type == "api_key" else {"headers": {name: value}}
+	)
+	with pytest.raises(ValueError):
+		Anvil({"base_url": "https://api.example.test", "authentication": {
+			"auth_type": auth_type, "credentials": credentials,
+		}}, session=session)
+	assert session.headers == {"Content-Type": "application/json"}
+	assert session.calls == []
+
+
 @pytest.mark.parametrize("endpoint", [
 	"https://other.example.test/items",
 	"http://api.example.test/items",

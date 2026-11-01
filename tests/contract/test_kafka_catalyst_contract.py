@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from oxidizer import Catalyst, KafkaConnection
@@ -35,8 +37,12 @@ class FakeKafkaProducer:
     def produce(self, topic_name, value):
         self.messages.append((topic_name, value))
 
-    def flush(self):
+    def flush(self, timeout=None):
         self.flushed = True
+        return 0
+
+    def poll(self, timeout):
+        return 0
 
 
 class FakeKafkaRecord:
@@ -71,6 +77,44 @@ class FakeKafkaConsumer:
 
     def commit(self, offsets=None, asynchronous=False):
         self.committed.append((offsets, asynchronous))
+
+
+@pytest.mark.parametrize("message", ["123", "true", "null", '{"id": 1}', b"123", 123, True, None, 1.5, (1,), {1}])
+@pytest.mark.parametrize("direct_adapter", [False, True])
+def test_kafka_rejects_scalar_payloads_before_any_writes(message, direct_adapter):
+    producer = FakeKafkaProducer()
+    catalyst = Catalyst(KafkaConnection(
+        admin_client=FakeKafkaAdminClient(), producer=producer, consumer=FakeKafkaConsumer(),
+    ))
+    writer = catalyst.catalyst if direct_adapter else catalyst
+    with pytest.raises(TypeError, match="dictionary or list"):
+        writer.write_to_stream("events", message)
+    with pytest.raises(TypeError, match="dictionary or list"):
+        writer.write_many_to_stream("events", [{"id": n} for n in range(5001)] + [message])
+    assert producer.messages == []
+    assert producer.flushed is False
+
+
+@pytest.mark.parametrize("message", [{}, [], {"values": ["123", "true", "null"]}, ["123", "true", "null"]])
+def test_kafka_structured_payload_round_trip(message):
+    producer = FakeKafkaProducer()
+
+    class Consumer(FakeKafkaConsumer):
+        def consume(self, num_messages=1, timeout=1.0):
+            return [
+                FakeKafkaRecord(value.encode(), offset=index)
+                for index, (_, value) in enumerate(producer.messages[:num_messages])
+            ]
+
+    catalyst = Catalyst(KafkaConnection(
+        admin_client=FakeKafkaAdminClient(), producer=producer, consumer=Consumer(),
+    ))
+    catalyst.write_to_stream("events", message)
+    assert catalyst.write_many_to_stream("events", [message]) == [None]
+    assert [json.loads(value) for _, value in producer.messages] == [message, message]
+    assert catalyst.read_from_stream("events", "workers", "worker-1", count=2) == [
+        ("0:0", message), ("0:1", message),
+    ]
 
 
 def test_kafka_catalyst_uses_confluent_admin_producer_and_consumer_contracts():

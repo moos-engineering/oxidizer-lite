@@ -6,6 +6,20 @@ A **formula** is a workflow definition: layers, nodes, input methods, output met
 
 Topology provides Formula/run inspection and a generic config-upload endpoint/tool for version 1 workflow, connection, and schema documents. Formula's `create_formula_config()`, `create_formula_connection()`, and `create_formula_schema()` methods persist each config class using the selected backend.
 
+### Stream Payloads
+
+Catalyst publishes JSON-serializable Python dictionaries or lists to Redis and
+Kafka. This applies to both single writes and each message in a batch. Other
+top-level values, including strings containing JSON text, raise `TypeError`
+before publishing. Batch writes validate all top-level payload types before
+writing any records; serialization or broker failures can still leave partial
+output.
+
+Wrap a scalar in a dictionary, such as `{"value": "123"}`, rather than sending
+`"123"` directly. Nested string values like `"123"`, `"true"`, and `"null"` remain
+strings after a round trip. Scalar publishing is no longer supported; decoding
+of existing stream messages is unchanged.
+
 ## Formula Document
 
 A workflow file may use the versioned envelope shown by the skeleton. `Formula.dag()` accepts either that envelope or the inner workflow object because Oxidizer unwraps the `workflow` field when present.
@@ -65,6 +79,10 @@ formula.create_formula_config("daily-users", config)
 
 Formula IDs are storage identifiers; the YAML `name` is descriptive and is not used to choose the storage key. The example stores the document at `formulas/daily-users.yml` under the configured S3 prefix, or `oxidizer:formulas:daily-users` in RedisJSON.
 
+S3 workflow discovery follows continuation tokens across all pages, including
+when more than 1,000 documents are stored. Only `.yml` keys under the configured
+`formulas/` prefix are included.
+
 ## Connection Document
 
 Connections use a versioned envelope. The `connection` mapping contains backend-specific settings; `name` is the stable global name referenced by workflow methods.
@@ -85,7 +103,7 @@ connection:
 
 Do not put literal credentials in checked-in YAML. Resolve secrets from a protected configuration process or runtime secret provider before storing the connection. The current API does not expand `${...}` placeholders automatically; it is illustrative unless your deployment performs that substitution.
 
-For services that require multiple fixed authentication headers, use `auth_type: headers` and provide a `credentials.headers` mapping. Header names and values must be strings; line breaks and transport-control headers such as `Host` and `Content-Length` are rejected. Keep credentials out of checked-in connection documents. See the [Alpaca example](../../examples/alpaca/README.md) for a seeder that injects its key pair from environment variables.
+For services that require multiple fixed authentication headers, use `auth_type: headers` and provide a `credentials.headers` mapping. Both `api_key` and `headers` authentication require valid HTTP-token header names and non-empty string values without line breaks; transport-control headers such as `Host` and `Content-Length` are rejected. Keep credentials out of checked-in connection documents. See the [Alpaca example](../../examples/alpaca/README.md) for a seeder that injects its key pair from environment variables.
 
 An AWS S3 Tables connection can use the existing SSO profile:
 

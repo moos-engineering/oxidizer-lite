@@ -96,16 +96,14 @@ class S3Formula(_RunIndex):
         return self.connection.object_key(f"states/{formula_id}/{run_id}.yml")
 
     def list_formula_configs(self):
-        """List YAML workflow IDs below the configured ``formulas/`` prefix.
+        """List YAML workflow IDs across all S3 pages under ``formulas/``.
 
         Returns:
             Formula IDs derived from matching ``.yml`` object keys.
         """
         prefix = self.connection.object_key("formulas/")
-        response = self.connection.client.list_objects_v2(Bucket=self.connection.bucket, Prefix=prefix)
         formula_ids = []
-        for item in response.get("Contents", []):
-            key = item["Key"]
+        for key in self._list_run_keys(prefix):
             if key.endswith(".yml"):
                 formula_ids.append(key.removeprefix(prefix).removesuffix(".yml"))
         self.residue.emit(

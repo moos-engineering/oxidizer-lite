@@ -103,6 +103,58 @@ def indexed_formula(request):
     return Formula(RedisConnection(client=FakeRedisClient()))
 
 
+def test_s3_formula_configs_paginate_and_later_formulas_can_be_invoked():
+    from oxidizer.utils.topology import Topology
+    from starlette.testclient import TestClient
+
+    class PaginatedClient(FakeS3Client):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+            self.calls.append((Bucket, Prefix, ContinuationToken))
+            keys = sorted(key for bucket, key in self.objects if bucket == Bucket and key.startswith(Prefix))
+            offset = int(ContinuationToken or 0)
+            response = {"Contents": [{"Key": key} for key in keys[offset:offset + 1000]],
+                        "IsTruncated": offset + 1000 < len(keys)}
+            if response["IsTruncated"]:
+                response["NextContinuationToken"] = str(offset + 1000)
+            return response
+
+    class InvocationCatalyst:
+        def __init__(self):
+            self.messages = []
+
+        def write_to_stream(self, topic_name, message):
+            self.messages.append((topic_name, message))
+            return "1-0"
+
+    storage = PaginatedClient()
+    formula = Formula(S3Connection(bucket="demo", prefix="formulae", client=storage))
+    expected = [f"workflow-{index:04d}" for index in range(1001)]
+    for name in expected:
+        formula.create_formula_config(name, {"layers": []})
+    storage.put_object(Bucket="demo", Key="formulae/formulas/ignore.txt", Body=b"ignored")
+    assert formula.list_formula_configs() == expected
+    assert storage.calls == [
+        ("demo", "formulae/formulas/", None),
+        ("demo", "formulae/formulas/", "1000"),
+    ]
+
+    catalyst = InvocationCatalyst()
+    topology = Topology(formula, catalyst)
+    topology.register_api_endpoints()
+    api = TestClient(topology.app)
+    assert api.get("/api/formulas").json() == {"formulas": expected}
+    response = api.post("/api/invocations", json={"formula_id": expected[-1]})
+    assert response.status_code == 202
+    assert response.json()["formula_id"] == expected[-1]
+    assert catalyst.messages == [("oxidizer:invocations", {
+        "formula_id": expected[-1], "run_id": response.json()["run_id"],
+    })]
+
+
 @pytest.mark.parametrize("status", ["success", "failed", "cancelled", "timed_out", "skipped"])
 def test_terminal_runs_leave_active_index_but_keep_history(indexed_formula, status):
     formula = indexed_formula
