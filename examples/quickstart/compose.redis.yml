@@ -1,13 +1,10 @@
 name: oxidizer-quickstart
 
 x-oxidizer: &oxidizer
-  image: oxidizer-quickstart:local
+  image: ghcr.io/moos-engineering/oxidizer-lite:latest
+  pull_policy: always
   environment:
     PYTHONPYCACHEPREFIX: /tmp/quickstart-python-cache
-  build:
-    context: ../..
-    dockerfile: docker/oxidizer-lite.dockerfile
-    target: runtime
   volumes:
     - .:/example:ro
 
@@ -49,11 +46,7 @@ services:
 
   api:
     <<: *oxidizer
-    image: oxidizer-quickstart-api:local
-    build:
-      context: ../..
-      dockerfile: docker/oxidizer-lite.dockerfile
-      target: api
+    image: ghcr.io/moos-engineering/oxidizer-lite:latest-api
     command: ["python", "-m", "app.api", "--config", "/example/runtime.redis.yml", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "127.0.0.1:8027:8000"

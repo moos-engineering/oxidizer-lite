@@ -19,23 +19,27 @@ Python function is deliberately pass-through: Crucible performs the SCD2 write.
 
 You need Docker with Compose v2 and at least 12 GiB available to Docker for the
 million-row demo. These services use local demo credentials, not production
-settings. Docker end-to-end verification is pending.
+settings.
 
 From the repository root:
 
 ```bash
 cd examples/quickstart
-docker compose -f compose.redis.yml up --build -d
+docker compose -f compose.redis.yml up -d
 docker compose -f compose.redis.yml logs seed
 ```
 
 Choose [compose.redis.yml](compose.redis.yml) for Redis or
 [compose.kafka.yml](compose.kafka.yml) for Kafka/Redpanda. Each is a standalone
 stack with RustFS, its selected broker, and the API/controller/worker roles.
-Both build `oxidizer-quickstart:local` for seed/controller/worker and
-`oxidizer-quickstart-api:local` for REST/MCP with embedded semantic documentation
-search; no published GHCR image is required. The first API build downloads its
-local embedding model; serving does not need a model download or API key.
+Both pull `ghcr.io/moos-engineering/oxidizer-lite:latest` for seed/controller/worker
+and `ghcr.io/moos-engineering/oxidizer-lite:latest-api` for REST/MCP with embedded
+semantic documentation search. Each startup checks for the latest published
+images. Releases publish `linux/amd64` and `linux/arm64` variants; Docker selects
+the host's architecture automatically. Older AMD64-only releases require
+`DOCKER_DEFAULT_PLATFORM=linux/amd64` on ARM hosts until a multi-platform release
+is published.
+Serving does not need a model download or API key.
 The seeder generates a reproducible 1,000,000-row Parquet fixture and uploads
 the data and YAML documents. Wait for `Ready to invoke
 quickstart_observations_redis` in the seed log before invoking.
@@ -48,7 +52,7 @@ its data when stopped. The generated Parquet file stays in this directory.
 For Kafka, run these commands instead:
 
 ```bash
-docker compose -f compose.kafka.yml up --build -d
+docker compose -f compose.kafka.yml up -d
 docker compose -f compose.kafka.yml logs seed
 ```
 
