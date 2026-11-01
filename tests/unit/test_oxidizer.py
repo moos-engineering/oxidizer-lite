@@ -63,6 +63,10 @@ class FakeCatalyst:
         self.reads = []
         self.writes = []
         self.acks = []
+        self.expirations = []
+
+    def set_ttl(self, topic_name, message_id, ttl):
+        self.expirations.append((topic_name, message_id, ttl))
 
     def create_stream(self, topic_name):
         self.created_streams.append(topic_name)
@@ -119,7 +123,8 @@ def test_oxidizer_does_not_duplicate_explicit_connection_sink():
 
 
 @pytest.mark.parametrize("wrap_workflow", [True, False])
-def test_oxidizer_reads_from_default_invocation_stream(wrap_workflow):
+@pytest.mark.parametrize("retention", [None, "1d"])
+def test_oxidizer_reads_from_default_invocation_stream(wrap_workflow, retention):
     formula = Formula(RedisConnection(client=FakeRedisClient()))
     workflow_config = {
         "layers": [
@@ -129,6 +134,7 @@ def test_oxidizer_reads_from_default_invocation_stream(wrap_workflow):
                     {
                         "name": "fetch_data",
                         "type": "scheduled",
+                        "outputs": {"methods": [{"method": "stream", "retention": "12h"}]},
                         "inputs": [
                             {
                                 "methods": [
@@ -152,7 +158,7 @@ def test_oxidizer_reads_from_default_invocation_stream(wrap_workflow):
     }
     catalyst = FakeCatalyst(messages=[("1-0", {"message": {"formula_id": "daily-users", "run_id": "run-123"}})])
     residue = Residue(capture_events=True, log_level="DEBUG")
-    oxidizer = Oxidizer(formula, catalyst, residue=residue)
+    oxidizer = Oxidizer(formula, catalyst, residue=residue, retention=retention)
 
     invocations = oxidizer.oxidize_invocations(consumer_name="worker-1", count=10, block=250)
 
@@ -193,6 +199,9 @@ def test_oxidizer_reads_from_default_invocation_stream(wrap_workflow):
     assert catalyst.created_streams == ["oxidizer:reagent"]
     assert catalyst.reads == [("oxidizer:invocations", "oxidizer-consumer-group", "worker-1", 10, 250)]
     assert catalyst.acks == [("oxidizer:invocations", "oxidizer-consumer-group", "1-0", "worker-1")]
+    assert catalyst.expirations == ([] if retention is None else [("oxidizer:invocations", "1-0", 86400)])
+    oxidizer.oxidize_formulas()
+    assert catalyst.writes[-1][1]["node"]["outputs"]["methods"][0]["retention"] == "12h"
 
 
 @pytest.mark.parametrize("stream", ["oxidizer:invocations", "oxidizer:invocations:priority"])
@@ -459,6 +468,55 @@ def test_oxidizer_dispatches_ready_nodes_to_worker_stream():
     }
 
 
+@pytest.mark.parametrize("retention", [None, "5m"])
+def test_oxidizer_dispatches_node_to_dedicated_task_stream(retention):
+    formula = Formula(RedisConnection(client=FakeRedisClient()))
+    formula.create_formula_state(
+        "daily-users",
+        {
+            "status": "created",
+            "connection_names": [],
+            "dag": {
+                "nodes": {
+                    "daily-users.bronze.fetch_data": {"name": "fetch_data", "layer": "bronze"},
+                    "daily-users.bronze.train_model": {
+                        "name": "train_model",
+                        "layer": "bronze",
+                        "task_stream": "oxidizer:reagent:gpu",
+                    },
+                },
+                "edges": {},
+                "reverse_edges": {},
+                "status": {
+                    "daily-users.bronze.fetch_data": "ready",
+                    "daily-users.bronze.train_model": "ready",
+                },
+            },
+        },
+        run_id="run-123",
+    )
+    catalyst = FakeCatalyst()
+    oxidizer = Oxidizer(formula, catalyst, retention=retention)
+
+    dispatched = oxidizer.oxidize_formulas()
+
+    assert dispatched == {("daily-users", "run-123"): [
+        "daily-users.bronze.fetch_data", "daily-users.bronze.train_model",
+    ]}
+    writes_by_node = {message["node_id"]: topic_name for topic_name, message in catalyst.writes}
+    assert writes_by_node == {
+        "daily-users.bronze.fetch_data": "oxidizer:reagent",
+        "daily-users.bronze.train_model": "oxidizer:reagent:gpu",
+    }
+    assert catalyst.expirations == ([] if retention is None else [
+        ("oxidizer:reagent", "1-0", 300), ("oxidizer:reagent:gpu", "2-0", 300),
+    ])
+    assert formula.load_formula_state("daily-users", run_id="run-123")["dag"]["status"] == {
+        "daily-users.bronze.fetch_data": "dispatched",
+        "daily-users.bronze.train_model": "dispatched",
+    }
+
+
 def test_oxidizer_does_not_dispatch_nodes_with_unmet_dependencies():
     formula = Formula(RedisConnection(client=FakeRedisClient()))
     formula.create_formula_state(
@@ -547,7 +605,8 @@ def test_oxidizer_missing_connection_does_not_publish_task_or_change_state():
     assert formula.load_formula_state("daily-users", run_id="run-123") == state
 
 
-def test_oxidizer_processes_valid_reagent_update_and_acks_message():
+@pytest.mark.parametrize("retention", [None, "12h"])
+def test_oxidizer_processes_valid_reagent_update_and_acks_message(retention):
     formula = Formula(RedisConnection(client=FakeRedisClient()))
     formula.create_formula_state(
         "daily-users",
@@ -583,7 +642,7 @@ def test_oxidizer_processes_valid_reagent_update_and_acks_message():
         ]
     )
     residue = Residue(capture_events=True, log_level="DEBUG")
-    oxidizer = Oxidizer(formula, catalyst, residue=residue)
+    oxidizer = Oxidizer(formula, catalyst, residue=residue, retention=retention)
 
     processed = oxidizer.oxidize_reagent_updates(consumer_name="controller-1")
 
@@ -615,6 +674,23 @@ def test_oxidizer_processes_valid_reagent_update_and_acks_message():
     assert started_state["completed_at"] is None
     assert catalyst.reads == [("oxidizer:controller", "oxidizer-consumer-group", "controller-1", 1, 1000)]
     assert catalyst.acks == [("oxidizer:controller", "oxidizer-consumer-group", "1-0", "controller-1")]
+    assert catalyst.expirations == ([] if retention is None else [("oxidizer:controller", "1-0", 43200)])
+
+
+def test_oxidizer_empty_reads_do_not_refresh_retention():
+    catalyst = FakeCatalyst()
+    oxidizer = Oxidizer(Formula(RedisConnection(client=FakeRedisClient())), catalyst, retention="1h")
+    oxidizer.oxidize_invocations(block=1)
+    oxidizer.oxidize_reagent_updates(block=1)
+    assert catalyst.expirations == []
+
+
+def test_oxidizer_rejects_invalid_retention_before_creating_streams():
+    catalyst = FakeCatalyst()
+    with pytest.raises(ValueError, match="retention"):
+        Oxidizer(Formula(RedisConnection(client=FakeRedisClient())), catalyst, retention="invalid")
+    assert catalyst.created_streams == []
+    assert catalyst.created_groups == []
 
 
 def test_oxidizer_retries_update_when_state_persistence_fails_before_ack(monkeypatch):

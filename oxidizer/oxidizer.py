@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from threading import Event
 
-from .core.catalyst import Catalyst
+from .core.catalyst import Catalyst, parse_retention
 from .core.formula import Formula, NodeStatus, TERMINAL_RUN_STATUSES
 from .core.residue import Residue
 from .utils.phase import ReagentUpdateMessage, ReagentUpdateType, TaskMessage, WorkerTaskType
@@ -21,7 +21,7 @@ class Oxidizer:
     routing; this controller owns durable lifecycle status and scheduling.
     """
 
-    def __init__(self, formula: Formula, catalyst: Catalyst, residue: Residue | None = None, sinks: list | tuple | None = None):
+    def __init__(self, formula: Formula, catalyst: Catalyst, residue: Residue | None = None, sinks: list | tuple | None = None, retention: str | int | None = None):
         """Bind dependencies and initialize controller stream resources.
 
         Args:
@@ -29,10 +29,12 @@ class Oxidizer:
             catalyst: Catalyst facade used for invocation, task, and update streams.
             residue: Optional logger shared with the controller dependencies.
             sinks: Optional sinks attached to the shared logger.
+            retention: Optional Redis control-stream TTL, in seconds or s/m/h/d/w.
         """
         self.residue = (residue or Residue()).bind(component_name="oxidizer")
         self.formula = formula
         self.catalyst = catalyst
+        self.retention = parse_retention(retention)
         self.oxidizer_consumer_group = 'oxidizer-consumer-group'
         self.oxidizer_invocation_stream_prefix = 'oxidizer:invocations'
         self.oxidizer_worker_stream = 'oxidizer:reagent'
@@ -345,6 +347,8 @@ class Oxidizer:
                 count=count,
                 block=block,
             )
+            if self.retention is not None and invocations:
+                self.catalyst.set_ttl(topic_name, invocations[-1][0], self.retention)
             self.residue.emit(
                 self.residue.ash.DEBUG,
                 "OXIDIZER: Read invocations",
@@ -507,6 +511,8 @@ class Oxidizer:
             count=count,
             block=block,
         )
+        if self.retention is not None and updates:
+            self.catalyst.set_ttl(self.oxidizer_controller_stream, updates[-1][0], self.retention)
         processed_updates = []
         for update_id, update_data in updates:
             update_payload = update_data.get("message", update_data) if isinstance(update_data, dict) else {}
@@ -555,9 +561,11 @@ class Oxidizer:
         """Dispatch all currently eligible nodes for one Formula run.
 
         Eligibility requires a scheduled, pending, or ready status and
-        completed parents. A task is published for each eligible node, its
-        status is changed to ``dispatched``, and the run state is written once
-        after dispatch. When no node is eligible, state is not rewritten.
+        completed parents. A task is published for each eligible node — to the
+        node's dedicated ``task_stream`` when one is configured, otherwise to
+        the shared worker stream — its status is changed to ``dispatched``, and
+        the run state is written once after dispatch. When no node is eligible,
+        state is not rewritten.
 
         Args:
             formula_id: Workflow identifier to load.
@@ -574,7 +582,11 @@ class Oxidizer:
 
         for node_id in ready_node_ids:
             task_message = self.__task_message_for_node(formula_id, run_id, node_id, formula_state)
-            self.catalyst.write_to_stream(self.oxidizer_worker_stream, task_message.to_dict())
+            node = formula_state["dag"]["nodes"][node_id]
+            task_stream = node.get("task_stream") or self.oxidizer_worker_stream
+            task_id = self.catalyst.write_to_stream(task_stream, task_message.to_dict())
+            if self.retention is not None:
+                self.catalyst.set_ttl(task_stream, task_id, self.retention)
             formula_state["dag"]["status"][node_id] = NodeStatus.DISPATCHED.value
 
         if ready_node_ids:
@@ -588,7 +600,6 @@ class Oxidizer:
             run_id=run_id,
             dispatched_count=len(ready_node_ids),
             node_ids=ready_node_ids,
-            worker_stream=self.oxidizer_worker_stream,
         )
         return ready_node_ids
 

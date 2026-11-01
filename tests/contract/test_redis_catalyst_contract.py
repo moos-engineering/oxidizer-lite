@@ -3,8 +3,23 @@ import json
 import pytest
 
 from oxidizer import Catalyst, RedisConnection, Residue
+from oxidizer.core.catalyst import parse_retention
 
 pytestmark = pytest.mark.contract
+
+
+@pytest.mark.parametrize("value,seconds", [
+    (None, None), (100, 100), ("100s", 100), ("5m", 300), ("1h", 3600),
+    ("12h", 43200), ("1d", 86400), ("1w", 604800), (" 2 H ", 7200),
+])
+def test_parse_retention(value, seconds):
+    assert parse_retention(value) == seconds
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "", "0s", "-1h", "1.5h", "1x", [], {}])
+def test_parse_retention_rejects_invalid_durations(value):
+    with pytest.raises(ValueError, match="retention"):
+        parse_retention(value)
 
 
 class ResponseError(Exception):
@@ -141,6 +156,39 @@ def test_redis_catalyst_creates_consumer_group_idempotently(redis_catalyst):
     catalyst.create_consumer_group("demo", "workers")
 
     assert ("demo", "workers") in client.groups
+
+
+def test_redis_read_recreates_expired_consumer_group(redis_catalyst, monkeypatch):
+    from redis.exceptions import ResponseError
+
+    catalyst, client = redis_catalyst
+    original_read = client.xreadgroup
+
+    def read(group_name, consumer_name, streams, **kwargs):
+        if ("demo", group_name) not in client.groups:
+            raise ResponseError("NOGROUP No such key or consumer group")
+        return original_read(group_name, consumer_name, streams, **kwargs)
+
+    monkeypatch.setattr(client, "xreadgroup", read)
+    message_id = catalyst.write_to_stream("demo", {"id": 1})
+    assert catalyst.read_from_stream("demo", "workers", "worker") == [
+        (message_id, {"message": {"id": 1}}),
+    ]
+    assert ("demo", "workers") in client.groups
+
+
+def test_redis_read_propagates_other_errors(redis_catalyst, monkeypatch):
+    from redis.exceptions import ResponseError
+
+    catalyst, client = redis_catalyst
+
+    def read(*args, **kwargs):
+        raise ResponseError("WRONGTYPE Operation against a non-stream key")
+
+    monkeypatch.setattr(client, "xreadgroup", read)
+    with pytest.raises(ResponseError, match="WRONGTYPE"):
+        catalyst.read_from_stream("demo", "workers", "worker")
+    assert client.groups == set()
 
 
 def test_redis_catalyst_writes_reads_acks_deletes_and_expires(redis_catalyst):

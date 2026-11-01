@@ -55,6 +55,13 @@ default command is `python -m app.api`; its default YAML path is
 `/oxidizer/controller+worker.yml`. The combined FastAPI app serves REST at
 `/api/...` and MCP at `/mcp`. Keep REST/MCP behind trusted access control.
 
+Set optional `controller.retention: 1d` in the runtime YAML to have only the
+controller apply Redis whole-stream TTLs to shared/dedicated worker task,
+worker-update, and invocation streams. Omit it to leave expiration unset.
+Data-output TTLs are configured independently with `retention` on each stream
+output method. See [Redis stream retention](../docs/reference/formulas-and-connections.md#redis-stream-retention)
+for refresh behavior and the risk of losing unread messages on expiration.
+
 Check process liveness with `/api/health`, and semantic-search readiness with
 `/api/docs/status` (200 ready, 503 unavailable). Missing/stale assets produce a
 structured diagnostic, never a keyword-only fallback or runtime model download.

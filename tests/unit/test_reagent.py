@@ -16,6 +16,10 @@ class FakeCatalyst:
         self.ack_batches = []
         self.operations = []
         self.created_streams = []
+        self.expirations = []
+
+    def set_ttl(self, topic_name, message_id, ttl):
+        self.expirations.append((topic_name, message_id, ttl))
 
     def create_consumer_group(self, topic_name, group_name):
         self.created_groups.append((topic_name, group_name))
@@ -886,12 +890,18 @@ def test_data_handler_reads_stream_batch_and_returns_deferred_acks():
     assert catalyst.reads == [("upstream", "lattice.consumer", "reagent", 2, 20)]
 
 
-def test_data_handler_writes_stream_records():
+@pytest.mark.parametrize("retention,ttl", [(None, None), ("100s", 100), ("5m", 300), ("1h", 3600)])
+@pytest.mark.parametrize("batched", [False, True])
+def test_data_handler_writes_stream_records(retention, ttl, batched):
     catalyst = FakeCatalyst()
+    if batched:
+        catalyst.write_many_to_stream = lambda stream, records: [
+            catalyst.write_to_stream(stream, record) for record in records
+        ]
     handler = DataHandler(catalyst=catalyst)
 
     message_ids = handler.outgoing_data(
-        {"method": "stream"},
+        {"method": "stream", "retention": retention},
         data=[{"id": 1}, {"id": 2}],
         context={"node_id": "producer"},
     )
@@ -899,6 +909,25 @@ def test_data_handler_writes_stream_records():
     assert message_ids == ["1-0", "2-0"]
     assert catalyst.created_streams == ["producer"]
     assert [message for _, message in catalyst.writes] == [{"id": 1}, {"id": 2}]
+    assert catalyst.expirations == ([] if ttl is None else [("producer", "2-0", ttl)])
+
+
+def test_data_handler_invalid_retention_does_not_write():
+    catalyst = FakeCatalyst()
+    with pytest.raises(ValueError, match="retention"):
+        DataHandler(catalyst=catalyst).outgoing_data(
+            {"method": "stream", "retention": "bad"}, data=[{"id": 1}], context={"node_id": "producer"},
+        )
+    assert catalyst.created_streams == []
+    assert catalyst.writes == []
+
+
+def test_data_handler_empty_output_does_not_refresh_retention():
+    catalyst = FakeCatalyst()
+    assert DataHandler(catalyst=catalyst).outgoing_data(
+        {"method": "stream", "stream": "custom-output", "retention": "1d"}, data=[],
+    ) == []
+    assert catalyst.expirations == []
 
 
 def test_data_handler_writes_records_to_s3_tables():
@@ -1030,6 +1059,8 @@ def test_reagent_react_uses_and_acks_dedicated_task_stream():
     assert process() == {"handled": True, "node_id": "daily-users.bronze.fetch_data"}
     assert catalyst.reads[0][0] == "custom:tasks"
     assert catalyst.acks == [("custom:tasks", "reagent-consumer-group", "task-9", "reagent")]
+    assert ("custom:tasks", "reagent-consumer-group") in catalyst.created_groups
+    assert catalyst.expirations == []
 
 
 def test_reagent_does_not_ack_inputs_when_output_fails():

@@ -14,8 +14,17 @@ catalyst:
 
 controller:
   log_level: info
+  retention: 3m
 
 worker:
+  log_level: info
+  custom_functions_file: /example/custom.py
+  custom_functions_router: quickstart_router
+
+# Dedicated worker: consumes only tasks from nodes that set
+# task_stream: oxidizer:reagent:special-worker in the workflow.
+special-worker:
+  task_stream: oxidizer:reagent:special-worker
   log_level: info
   custom_functions_file: /example/custom.py
   custom_functions_router: quickstart_router

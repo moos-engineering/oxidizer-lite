@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
-from oxidizer.core.catalyst import Catalyst
+from oxidizer.core.catalyst import Catalyst, parse_retention
 from oxidizer.core.lattice import (
     IcebergRestConnection,
     KafkaConnection,
@@ -526,12 +526,17 @@ class DataHandler:
             stream = details.get("stream", details.get("topic")) or context.get("node_id")
             if not stream:
                 raise ValueError("Stream output requires a stream, topic, or context node_id")
+            retention = parse_retention(details.get("retention"))
             catalyst.create_stream(stream)
             records = data if isinstance(data, list) else ([] if data is None else [data])
             write_many = getattr(catalyst, "write_many_to_stream", None)
             if callable(write_many):
-                return write_many(stream, records)
-            return [catalyst.write_to_stream(stream, record) for record in records]
+                message_ids = write_many(stream, records)
+            else:
+                message_ids = [catalyst.write_to_stream(stream, record) for record in records]
+            if retention is not None and message_ids:
+                catalyst.set_ttl(stream, message_ids[-1], retention)
+            return message_ids
 
         if method_type in ("s3table", "s3tables", "s3_table", "s3_tables", "tables"):
             owns_crucible = not isinstance(connection, Crucible)
@@ -1030,6 +1035,7 @@ class Reagent(DataHandler):
         Args:
             func: Optional function when used as ``@reagent.react`` directly.
             dedicated_stream: Optional task-stream override for this handler.
+                Its consumer group is created when the decorator is applied.
             handler_mode: ``data_context`` or ``task``; other values fail when
                 the decorator is created.
 
@@ -1038,6 +1044,10 @@ class Reagent(DataHandler):
         """
         if handler_mode not in {"data_context", "task"}:
             raise ValueError("handler_mode must be 'data_context' or 'task'")
+        if dedicated_stream is not None:
+            # Dedicated streams are not prepared in __init__; create the
+            # consumer group here so the first read cannot fail.
+            self.catalyst.create_consumer_group(dedicated_stream, self.reagent_consumer_group)
 
         def decorator(handler):
             @wraps(handler)

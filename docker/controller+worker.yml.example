@@ -17,6 +17,8 @@ catalyst:
 controller:
   idle_poll_seconds: 1
   log_level: debug
+  # Optional Redis whole-stream TTL; refreshed on task writes and control reads.
+  # retention: 1d
 
 worker:
   task_stream: oxidizer:reagent

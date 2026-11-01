@@ -15,6 +15,21 @@ records to a stream/topic, and upserts an Iceberg table. The silver node consume
 those records and applies the schema's SCD2 policy to build history. The silver
 Python function is deliberately pass-through: Crucible performs the SCD2 write.
 
+In the Redis demo, the silver node sets `task_stream:
+oxidizer:reagent:special-worker` in [workflow.redis.yml](workflows/workflow.redis.yml),
+so the controller dispatches its tasks to the dedicated `special-worker`
+service (configured in [runtime.redis.yml](runtime.redis.yml)) instead of the
+shared worker stream. Use this pattern to pin nodes to specific machines, such
+as GPU instances.
+
+The Redis demo sets `controller.retention: 3m` in
+[runtime.redis.yml](runtime.redis.yml) and `retention: 3m` on the bronze stream
+output in [workflow.redis.yml](workflows/workflow.redis.yml). These expire entire
+stream keys, including messages and consumer groups. Task writes and non-empty
+control reads refresh control TTLs; non-empty output writes refresh the data
+TTL. Use longer durations for slower runs or outages, or omit retention to
+leave expiration unset. Kafka retention is configured separately at the broker.
+
 ## Start
 
 You need Docker with Compose v2 and at least 12 GiB available to Docker for the
@@ -108,7 +123,7 @@ finality and recovery behavior remain limited.
 
 | File | Change here |
 | --- | --- |
-| [runtime.redis.yml](runtime.redis.yml), [runtime.kafka.yml](runtime.kafka.yml) | Formula store, primary transport, log level, worker router, selected workflow |
+| [runtime.redis.yml](runtime.redis.yml), [runtime.kafka.yml](runtime.kafka.yml) | Formula store, primary transport, log level, worker router, dedicated worker task stream, selected workflow |
 | [workflow.redis.yml](workflows/workflow.redis.yml), [workflow.kafka.yml](workflows/workflow.kafka.yml) | Bronze/silver nodes, dependencies, input paths, batch sizes, outputs |
 | [local-files.yml](connections/local-files.yml), [local-lake.yml](connections/local-lake.yml) | Named S3 input and Iceberg output connections |
 | [upsert-observations.yml](schemas/upsert-observations.yml) | Typed fields, entity/time keys, winning source revision |
@@ -123,7 +138,7 @@ After changing documents or custom code, rerun the seeder and restart the roles:
 
 ```bash
 docker compose -f compose.redis.yml run --rm seed
-docker compose -f compose.redis.yml restart api controller worker
+docker compose -f compose.redis.yml restart api controller worker special-worker
 ```
 
 Use `-f compose.kafka.yml` for Kafka. Reseeding overwrites documents and
