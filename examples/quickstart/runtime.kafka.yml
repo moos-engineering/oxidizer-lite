@@ -1,0 +1,34 @@
+formula:
+  provider: s3
+  bucket: quickstart-configs
+  prefix: quickstart
+  endpoint_url: http://oxidizer-quickstart-rustfs.test:9000
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  addressing_style: path
+
+catalyst:
+  provider: redpanda
+  bootstrap_servers: oxidizer-quickstart-redpanda.test:9092
+  group_id: quickstart-api
+  broker.address.family: v4
+  consumer_config:
+    auto.offset.reset: earliest
+    enable.auto.commit: false
+
+controller:
+  log_level: info
+  kafka_group_id: quickstart-controller
+
+worker:
+  log_level: info
+  kafka_group_id: quickstart-workers
+  custom_functions_file: /example/custom.py
+  custom_functions_router: quickstart_router
+
+quickstart_seed:
+  data_bucket: quickstart-data
+  data_key: quickstart/observations.parquet
+  table_bucket: quickstart-tables
+  workflow_file: workflows/workflow.kafka.yml

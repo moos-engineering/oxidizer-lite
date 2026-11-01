@@ -1,0 +1,12 @@
+templateVersion: 1
+name: quickstart_lake
+type: connection
+connection:
+  type: s3_tables
+  provider: rustfs
+  endpoint_url: http://oxidizer-quickstart-rustfs.test:9000
+  catalog_endpoint: http://oxidizer-quickstart-rustfs.test:9000/iceberg
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  aws_s3_table_bucket: quickstart-tables

@@ -1,0 +1,97 @@
+name: oxidizer-quickstart
+
+x-oxidizer: &oxidizer
+  image: oxidizer-quickstart:local
+  environment:
+    PYTHONPYCACHEPREFIX: /tmp/quickstart-python-cache
+  build:
+    context: ../..
+    dockerfile: docker/oxidizer-lite.dockerfile
+    target: runtime
+  volumes:
+    - .:/example:ro
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: oxidizer-quickstart-rustfs
+    networks:
+      default:
+        aliases: [oxidizer-quickstart-rustfs.test]
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_VOLUMES: /data
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: oxidizer-quickstart-redpanda
+    networks:
+      default:
+        aliases: [oxidizer-quickstart-redpanda.test]
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --overprovisioned
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://oxidizer-quickstart-redpanda.test:9092
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  seed:
+    <<: *oxidizer
+    volumes:
+      - .:/example
+    command: ["python", "/example/seed.py", "--config", "/example/runtime.kafka.yml"]
+    depends_on:
+      rustfs:
+        condition: service_started
+
+  api:
+    <<: *oxidizer
+    image: oxidizer-quickstart-api:local
+    build:
+      context: ../..
+      dockerfile: docker/oxidizer-lite.dockerfile
+      target: api
+    command: ["python", "-m", "app.api", "--config", "/example/runtime.kafka.yml", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8027:8000"
+    depends_on:
+      rustfs:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+
+  controller:
+    <<: *oxidizer
+    command: ["python", "-m", "app.controller", "--config", "/example/runtime.kafka.yml"]
+    depends_on:
+      rustfs:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+
+  worker:
+    <<: *oxidizer
+    command: ["python", "-m", "app.worker", "--config", "/example/runtime.kafka.yml"]
+    mem_limit: 7g
+    cpus: 4
+    depends_on:
+      rustfs:
+        condition: service_started
+      redpanda:
+        condition: service_healthy

@@ -1,0 +1,27 @@
+formula:
+  provider: s3
+  bucket: quickstart-configs
+  prefix: quickstart
+  endpoint_url: http://oxidizer-quickstart-rustfs.test:9000
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  addressing_style: path
+
+catalyst:
+  provider: redis
+  url: redis://oxidizer-quickstart-redis.test:6379/0
+
+controller:
+  log_level: info
+
+worker:
+  log_level: info
+  custom_functions_file: /example/custom.py
+  custom_functions_router: quickstart_router
+
+quickstart_seed:
+  data_bucket: quickstart-data
+  data_key: quickstart/observations.parquet
+  table_bucket: quickstart-tables
+  workflow_file: workflows/workflow.redis.yml
