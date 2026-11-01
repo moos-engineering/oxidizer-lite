@@ -78,8 +78,8 @@ builds the semantic assets from its bundled docs.
 The active [release workflow](../.github/workflows/release.yml) runs when a
 `v*` Git tag is pushed. After the Linux/macOS tests and package validation pass,
 it publishes the package to PyPI, then builds and publishes `linux/amd64` and
-`linux/arm64` variants of both
-images to `ghcr.io/moos-engineering/oxidizer-lite`:
+`linux/arm64` variants of both images on native runners, then combines them
+under multi-platform tags in `ghcr.io/moos-engineering/oxidizer-lite`:
 
 - Runtime: `<version>` and `latest`
 - API: `<version>-api` and `latest-api`
