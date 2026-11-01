@@ -46,8 +46,10 @@ def test_quickstart_compose_uses_split_images_and_disposable_storage(backend):
         assert compose["services"]["redis"]["command"] == ["redis-server", "--appendonly", "no", "--save", ""]
     for name in ("seed", "api", "controller", "worker"):
         service = compose["services"][name]
-        assert service["image"] == ("oxidizer-quickstart-api:local" if name == "api" else "oxidizer-quickstart:local")
-        assert service["build"]["target"] == ("api" if name == "api" else "runtime")
+        assert service["image"] == f"ghcr.io/moos-engineering/oxidizer-lite:{'latest-api' if name == 'api' else 'latest'}"
+        assert service["pull_policy"] == "always"
+        assert "platform" not in service
+        assert "build" not in service
         assert service["command"][service["command"].index("--config") + 1] == f"/example/runtime.{backend}.yml"
         assert len(service["volumes"]) == 1
     for name in ("api", "controller", "worker"):

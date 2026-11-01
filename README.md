@@ -33,7 +33,7 @@ From the repository root:
 
 ```bash
 cd examples/quickstart
-docker compose -f compose.redis.yml up --build -d
+docker compose -f compose.redis.yml up -d
 docker compose -f compose.redis.yml logs seed
 ```
 
