@@ -80,6 +80,7 @@ class Anvil:
 			token = credentials.get("token")
 			if not token:
 				raise ValueError("Bearer authentication requires credentials.token")
+			self._validate_authentication_header("Authorization", token)
 			self.session.headers.update({"Authorization": f"Bearer {token}"})
 		elif auth_type == "api_key":
 			key_name = credentials.get("key_name")

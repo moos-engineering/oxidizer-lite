@@ -948,13 +948,17 @@ class KafkaConnection(Lattice):
 
         return import_module("confluent_kafka").Producer(self._confluent_config(self.producer_config))
 
-    def _create_consumer(self):
+    def _create_consumer(self, *, group_id_suffix: str | None = None):
         """Create a Confluent consumer and subscribe it to configured topics."""
         from importlib import import_module
 
-        consumer = import_module("confluent_kafka").Consumer(
-            self._confluent_config(self.consumer_config, include_group=True)
-        )
+        config = self._confluent_config(self.consumer_config, include_group=True)
+        if config.get("enable.auto.commit", False) not in (False, "false"):
+            raise ValueError("Kafka consumers require enable.auto.commit=false for processed-prefix acknowledgements")
+        config["enable.auto.commit"] = False
+        if group_id_suffix is not None:
+            config["group.id"] = f"{config['group.id']}.{group_id_suffix}"
+        consumer = import_module("confluent_kafka").Consumer(config)
         if self.consumer_topics:
             consumer.subscribe(self.consumer_topics)
         return consumer
@@ -1134,4 +1138,3 @@ class OllamaConnection(Lattice):
             timeout=self.timeout,
         )
         return {key: value for key, value in kwargs.items() if value is not None}
-

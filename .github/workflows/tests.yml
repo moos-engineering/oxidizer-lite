@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-26.04, macos-latest]
         python: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
@@ -51,7 +51,7 @@ jobs:
     name: Required Tests
     needs: pytest
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Require every test runner to pass

@@ -45,7 +45,25 @@ Prefer role YAML settings in container deployments and explicit Python parameter
 
 For persisted logs, construct `RedisStreamLogSink` with an existing `RedisConnection` and pass it in `Oxidizer(sinks=...)`, or attach it to a shared `Residue` passed to the components. Sink construction and attachment are explicit.
 
-Some standalone examples attach a `RedisStreamLogSink` to their root `Residue`. The container API/controller/worker entrypoints do not automatically attach one; use their stdout logs unless your application explicitly adds a sink. Topology's formula-log tools only see events actually written to Redis, not container stdout.
+Some standalone examples attach a `RedisStreamLogSink` to their root `Residue`. The container API/controller/worker entrypoints do not attach one by default; use their stdout logs unless you explicitly opt in. Topology's formula-log tools only see events actually written to Redis, not container stdout.
+
+To explicitly enable persisted logs for container roles using the shared runtime
+YAML, set:
+
+```yaml
+catalyst:
+  provider: redis
+  url: redis://redis:6379/0
+  persist_logs: true
+```
+
+`persist_logs` defaults to `false` and must be a YAML boolean. It attaches a
+`RedisStreamLogSink` to each role's shared trace using its existing Catalyst
+connection. Kafka Catalyst connections do not support this setting when enabled.
+The sink uses the effective role log level, approximate `maxlen` of 10,000 per
+stream, and no TTL by default. Persisted logs are accessible through the log
+inspection tools; keep REST/MCP behind trusted access control. Restart the roles
+after changing this setting.
 
 ## Enable A DEBUG Trace
 

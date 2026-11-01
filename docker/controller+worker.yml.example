@@ -11,6 +11,7 @@ formula:
 catalyst:
   provider: redis
   url: redis://redis:6379/0
+  persist_logs: false
   # For Kafka, replace these with provider: kafka, bootstrap_servers, and group_id.
 
 controller:

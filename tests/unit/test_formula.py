@@ -187,6 +187,44 @@ def test_partial_redis_update_uses_persisted_status_for_marker():
     assert formula.list_active_formula_runs() == []
 
 
+@pytest.mark.parametrize("listing", ["schemas", "analyses", "filtered-analyses"])
+def test_s3_schema_and_analysis_listings_follow_all_pages(listing):
+    class PaginatedClient(FakeS3Client):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+            self.calls.append((Bucket, Prefix, ContinuationToken))
+            keys = sorted(key for bucket, key in self.objects if bucket == Bucket and key.startswith(Prefix))
+            offset = int(ContinuationToken or 0)
+            response = {"Contents": [{"Key": key} for key in keys[offset:offset + 1000]],
+                        "IsTruncated": offset + 1000 < len(keys)}
+            if response["IsTruncated"]:
+                response["NextContinuationToken"] = str(offset + 1000)
+            return response
+
+    client = PaginatedClient()
+    formula = Formula(S3Connection(bucket="demo", prefix="formulae", client=client))
+    relative_prefix = "schemas/" if listing == "schemas" else "analyses/orders/"
+    expected = [f"item-{index:04d}" for index in range(1001)]
+    for name in reversed(expected):
+        client.put_object(Bucket="demo", Key=f"formulae/{relative_prefix}{name}.yml", Body=b"{}")
+    client.put_object(Bucket="demo", Key=f"formulae/{relative_prefix}ignore.txt", Body=b"ignored")
+    client.put_object(Bucket="demo", Key="formulae/analyses/other/run.yml", Body=b"{}")
+    if listing == "schemas":
+        actual = formula.list_formula_schemas()
+        prefix = "formulae/schemas/"
+    else:
+        actual = formula.list_formula_analyses("orders" if listing == "filtered-analyses" else None)
+        expected = [f"orders/{name}" for name in expected]
+        prefix = "formulae/analyses/orders/" if listing == "filtered-analyses" else "formulae/analyses/"
+        if listing == "analyses":
+            expected.append("other/run")
+    assert actual == expected
+    assert client.calls == [("demo", prefix, None), ("demo", prefix, "1000")]
+
+
 def test_s3_state_and_marker_listings_follow_continuation_tokens():
     class PaginatedClient(FakeS3Client):
         def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):

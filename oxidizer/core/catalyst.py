@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Any
 
 from .lattice import RedisConnection, KafkaConnection
@@ -392,6 +393,41 @@ class KafkaCatalyst:
         self.connection = connection
         self.residue = residue
         self.backend = "kafka"
+        self._pending_offsets: dict[tuple[str, int], dict[int, bool]] = {}
+        self._topic_consumers: dict[str, Any] = {}
+        self._assigned_topics: set[str] = set()
+
+    def _consumer_for_topic(self, topic_name: str):
+        if topic_name in self._topic_consumers:
+            return self._topic_consumers[topic_name]
+        if not self._topic_consumers:
+            consumer = self.connection.consumer
+        else:
+            if not self.connection.bootstrap_servers:
+                raise ValueError("Consuming multiple Kafka topics requires configured bootstrap_servers")
+            consumer = self.connection._create_consumer(group_id_suffix=topic_name)
+        try:
+            consumer.subscribe(
+                [topic_name],
+                on_assign=self._assign_partition_tracking,
+                on_revoke=self._clear_partition_tracking,
+                on_lost=self._clear_partition_tracking,
+            )
+        except Exception:
+            if consumer is not self.connection.consumer:
+                consumer.close()
+            raise
+        self._topic_consumers[topic_name] = consumer
+        return consumer
+
+    def _clear_partition_tracking(self, consumer, partitions) -> None:
+        for partition in partitions:
+            self._pending_offsets.pop((partition.topic, partition.partition), None)
+            self._assigned_topics.discard(partition.topic)
+
+    def _assign_partition_tracking(self, consumer, partitions) -> None:
+        self._clear_partition_tracking(consumer, partitions)
+        self._assigned_topics.update(partition.topic for partition in partitions)
 
     @staticmethod
     def _topic_name(topic_name: str) -> str:
@@ -522,7 +558,8 @@ class KafkaCatalyst:
             group_name: Shared-interface group label used in diagnostics.
             consumer_name: Shared-interface consumer label used in diagnostics.
             count: Maximum number of records to consume.
-            block: Maximum consume wait in milliseconds.
+            block: Maximum consume wait in milliseconds after assignment.
+                Initial assignment can take up to 30 seconds.
             stream_id: Shared-interface offset selector; unused by Kafka.
 
         Returns:
@@ -532,8 +569,18 @@ class KafkaCatalyst:
             RuntimeError: If a consumed Kafka record reports an error.
         """
         topic_name = self._topic_name(topic_name)
-        self.connection.consumer.subscribe([topic_name])
-        records = self.connection.consumer.consume(num_messages=count, timeout=block / 1000)
+        consumer = self._consumer_for_topic(topic_name)
+        assignment_deadline = time.monotonic() + 30
+        while True:
+            records = consumer.consume(num_messages=count, timeout=block / 1000)
+            if records or topic_name in self._assigned_topics:
+                break
+            if time.monotonic() >= assignment_deadline:
+                raise TimeoutError(f"Kafka consumer assignment timed out for topic {topic_name}")
+        for record in records:
+            if not record.error():
+                pending = self._pending_offsets.setdefault((topic_name, record.partition()), {})
+                pending.setdefault(record.offset(), False)
         messages = []
         for record in records:
             if record.error():
@@ -608,7 +655,7 @@ class KafkaCatalyst:
         }
 
     def ack_message(self, topic_name: str, group_name: str, message_id: str, consumer_name: str | None = None):
-        """Commit the specific partition offset returned by the reader."""
+        """Acknowledge one delivered record and commit any processed prefix."""
         self.ack_messages(topic_name, group_name, [message_id], consumer_name)
         return
 
@@ -619,21 +666,47 @@ class KafkaCatalyst:
         message_ids: list[str],
         consumer_name: str | None = None,
     ) -> int:
-        """Commit the supplied partition offsets for a batch of messages."""
+        """Acknowledge delivered records and commit their processed prefix.
+
+        Later acknowledgements are retained until earlier delivered records
+        in that partition are acknowledged. Undelivered/stale IDs are rejected.
+        Numeric gaps between delivered offsets are allowed.
+        """
         if not message_ids:
             return 0
         from confluent_kafka import TopicPartition
 
-        next_offsets: dict[int, int] = {}
+        kafka_topic = self._topic_name(topic_name)
+        acknowledged: dict[int, set[int]] = {}
         for message_id in message_ids:
             partition, offset = (int(value) for value in message_id.split(":"))
-            next_offsets[partition] = max(next_offsets.get(partition, 0), offset + 1)
-        kafka_topic = self._topic_name(topic_name)
+            if offset not in self._pending_offsets.get((kafka_topic, partition), {}):
+                raise ValueError("Kafka acknowledgement must reference a record delivered by this Catalyst")
+            acknowledged.setdefault(partition, set()).add(offset)
+        prefixes: dict[int, list[int]] = {}
+        for partition, processed in acknowledged.items():
+            pending = self._pending_offsets[(kafka_topic, partition)]
+            prefix = []
+            for offset, already_processed in pending.items():
+                if not already_processed and offset not in processed:
+                    break
+                prefix.append(offset)
+            if prefix:
+                prefixes[partition] = prefix
         offsets = [
-            TopicPartition(kafka_topic, partition, offset)
-            for partition, offset in next_offsets.items()
+            TopicPartition(kafka_topic, partition, prefix[-1] + 1)
+            for partition, prefix in prefixes.items()
         ]
-        self.connection.consumer.commit(offsets=offsets, asynchronous=False)
+        if offsets:
+            committed = self._topic_consumers[kafka_topic].commit(offsets=offsets, asynchronous=False)
+            if committed and any(partition.error for partition in committed):
+                raise RuntimeError("Kafka failed to commit one or more processed partition prefixes")
+        for partition, processed in acknowledged.items():
+            pending = self._pending_offsets[(kafka_topic, partition)]
+            for offset in processed:
+                pending[offset] = True
+            for offset in prefixes.get(partition, []):
+                del pending[offset]
         self.residue.emit(
             self.residue.ash.DEBUG,
             "CATALYST: Committed Kafka message offsets",

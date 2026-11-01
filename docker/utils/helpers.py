@@ -38,12 +38,20 @@ def load_custom_router(file_path: str | None, router_name: str | None):
 def create_catalyst_connection(
 	config: dict[str, Any], residue: Residue, *, group_id: str | None = None
 ) -> RedisConnection | KafkaConnection:
-	provider = config.get("provider", "redis")
+	"""Create a transport connection; Redis log persistence requires explicit opt-in."""
+	connection_config = dict(config)
+	persist_logs = connection_config.pop("persist_logs", False)
+	if not isinstance(persist_logs, bool):
+		raise ValueError("catalyst.persist_logs must be a YAML boolean")
+	provider = connection_config.get("provider", "redis")
+	if persist_logs and provider not in RedisConnection.supported_providers:
+		raise ValueError("catalyst.persist_logs requires a Redis Catalyst connection")
 	if provider in RedisConnection.supported_providers:
-		connection = RedisConnection(**config, residue=residue)
-		residue.add_sink(RedisStreamLogSink(connection=connection))
+		connection = RedisConnection(**connection_config, residue=residue)
+		if persist_logs:
+			residue.add_sink(RedisStreamLogSink(connection=connection))
 	elif provider in KafkaConnection.supported_providers:
-		kafka_config = dict(config)
+		kafka_config = connection_config
 		kafka_config["create_consumer"] = True
 		if group_id:
 			kafka_config["group_id"] = group_id

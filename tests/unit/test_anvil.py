@@ -55,6 +55,18 @@ def test_anvil_configures_bearer_auth_and_get_request():
 	assert session.calls == [("GET", "https://api.example.test/v1/records", {"limit": 2})]
 
 
+@pytest.mark.parametrize("token", [None, "", 123, True, ["token"], {"value": "token"},
+	"token\rInjected: yes", "token\nInjected: yes", "token\r\nInjected: yes"])
+def test_anvil_rejects_invalid_bearer_tokens_before_installing_header(token):
+	session = FakeSession()
+	with pytest.raises(ValueError):
+		Anvil({"base_url": "https://api.example.test", "authentication": {
+			"auth_type": "bearer", "credentials": {"token": token},
+		}}, session=session)
+	assert session.headers == {"Content-Type": "application/json"}
+	assert session.calls == []
+
+
 def test_anvil_configures_api_key_and_posts_json():
 	session = FakeSession()
 	anvil = Anvil(

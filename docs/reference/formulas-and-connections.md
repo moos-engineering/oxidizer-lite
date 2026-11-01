@@ -20,6 +20,34 @@ Wrap a scalar in a dictionary, such as `{"value": "123"}`, rather than sending
 strings after a round trip. Scalar publishing is no longer supported; decoding
 of existing stream messages is unchanged.
 
+### Kafka Acknowledgements
+
+Kafka acknowledgements apply only to records delivered by the same Catalyst
+instance. The adapter tracks delivery order per topic/partition and commits
+only the processed prefix. Acknowledging a later record first does not advance
+the commit past an earlier unprocessed record; it is retained until the gap in
+processing is closed. Numeric offset gaps from compaction or transactions are
+allowed.
+
+The acknowledgement count reports accepted message IDs, not necessarily records
+committed immediately. Unknown or stale IDs raise `ValueError`; broker commit
+errors propagate and leave tracking available for retry. Tracking is in memory,
+is cleared for affected partitions on assignment/revocation/loss. Each consumed
+topic uses a separate consumer, so reading workflow data does not revoke an
+outstanding control-task record. The first topic uses the configured group;
+additional topics use `<configured-group>.<normalized-topic>` groups to avoid
+control/data rebalances. Reads wait up to 30 seconds for assignment before
+applying the configured consume wait; assignment failure raises an error rather
+than reporting an empty stream. Additional consumers
+require configured `bootstrap_servers`, including when the first consumer is
+injected. Do not carry acknowledgements across rebalances or
+manually seek/reassign the underlying consumer while using Catalyst.
+
+Created Kafka consumers disable automatic commits and reject configurations
+that enable them. Injected consumers must also have `enable.auto.commit=false`
+and be consumed/committed exclusively through this Catalyst. This does not
+provide exactly-once processing; crashes can replay uncommitted records.
+
 ## Formula Document
 
 A workflow file may use the versioned envelope shown by the skeleton. `Formula.dag()` accepts either that envelope or the inner workflow object because Oxidizer unwraps the `workflow` field when present.
@@ -82,8 +110,15 @@ Formula IDs are storage identifiers; the YAML `name` is descriptive and is not u
 S3 workflow discovery follows continuation tokens across all pages, including
 when more than 1,000 documents are stored. Only `.yml` keys under the configured
 `formulas/` prefix are included.
+Schema and stored-analysis listings also follow all S3 pages and include only
+`.yml` keys. Analysis listings can be limited to one formula without changing
+their `<formula_id>/<run_id>` identifiers.
 
 ## Connection Document
+
+Bearer authentication requires a non-empty string token without carriage returns
+or line feeds. Invalid tokens are rejected before installing the Authorization
+header, rather than waiting for request preparation.
 
 Connections use a versioned envelope. The `connection` mapping contains backend-specific settings; `name` is the stable global name referenced by workflow methods.
 

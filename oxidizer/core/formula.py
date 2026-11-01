@@ -165,13 +165,12 @@ class S3Formula(_RunIndex):
         return yaml.safe_load(response["Body"].read()) or {}
 
     def list_formula_schemas(self) -> list[str]:
-        """List YAML schema names below the configured ``schemas/`` prefix."""
+        """List YAML schema names across all S3 pages under ``schemas/``."""
         prefix = self.connection.object_key("schemas/")
-        response = self.connection.client.list_objects_v2(Bucket=self.connection.bucket, Prefix=prefix)
         names = [
-            item["Key"].removeprefix(prefix).removesuffix(".yml")
-            for item in response.get("Contents", [])
-            if item["Key"].endswith(".yml")
+            key.removeprefix(prefix).removesuffix(".yml")
+            for key in self._list_run_keys(prefix)
+            if key.endswith(".yml")
         ]
         return sorted(names)
 
@@ -540,7 +539,7 @@ class S3Formula(_RunIndex):
             return {}
 
     def list_formula_analyses(self, formula_id: str | None = None) -> list[str]:
-        """List stored analysis IDs, optionally limited to one Formula.
+        """List stored analysis IDs across all S3 pages, optionally for one Formula.
 
         Args:
             formula_id: Optional workflow ID prefix filter.
@@ -549,11 +548,9 @@ class S3Formula(_RunIndex):
             Sorted-by-storage-order IDs shaped as ``<formula_id>/<run_id>``.
         """
         prefix = self.connection.object_key(f"analyses/{formula_id}/" if formula_id else "analyses/")
-        response = self.connection.client.list_objects_v2(Bucket=self.connection.bucket, Prefix=prefix)
         analyses = []
         base_prefix = self.connection.object_key("analyses/")
-        for item in response.get("Contents", []):
-            key = item["Key"]
+        for key in self._list_run_keys(prefix):
             if key.endswith(".yml"):
                 analyses.append(key.removeprefix(base_prefix).removesuffix(".yml"))
         return analyses

@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test-linux:
     name: Linux tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -63,7 +63,7 @@ jobs:
 
   build:
     needs: [test-linux, test-macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -93,7 +93,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment:
       name: release
@@ -109,7 +109,7 @@ jobs:
 
   publish-container:
     needs: [build, publish]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       matrix:

@@ -519,9 +519,22 @@ def test_kafka_catalyst_ack_messages_commits_specific_offsets():
                 asynchronous,
             ))
 
+        def subscribe(self, topics, **callbacks):
+            pass
+
+        def consume(self, **kwargs):
+            return [
+                SimpleNamespace(
+                    error=lambda: None, value=lambda: b'{}',
+                    partition=lambda p=partition: p, offset=lambda o=offset: o,
+                )
+                for partition, offset in [(0, 1), (0, 2), (1, 4)]
+            ]
+
     consumer = Consumer()
     catalyst = KafkaCatalyst(SimpleNamespace(consumer=consumer), Residue())
 
+    catalyst.read_from_stream("orders", "workers", "worker", count=3, block=1)
     assert catalyst.ack_messages("orders", "workers", ["0:1", "0:2", "1:4"]) == 3
     assert catalyst.ack_messages("orders", "workers", []) == 0
     assert consumer.commits == [([("orders", 0, 3), ("orders", 1, 5)], False)]
