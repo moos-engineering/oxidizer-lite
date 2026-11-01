@@ -26,10 +26,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -41,7 +41,7 @@ jobs:
         run: python -m pytest -m "not integration" --junitxml=pytest-results.xml
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python }}
           path: pytest-results.xml
