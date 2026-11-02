@@ -19,6 +19,7 @@ workflow:
           outputs:
             methods:
               - method: stream
+                retention: 3m
               - method: s3_tables
                 connection: quickstart_lake
                 schema: quickstart_observation_upsert
@@ -28,6 +29,7 @@ workflow:
     - name: silver
       nodes:
         - name: transform_observation_history
+          task_stream: oxidizer:reagent:special-worker
           inputs:
             - ref: quickstart_observations_redis.bronze.raw_observations
               alias: observations

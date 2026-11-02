@@ -39,12 +39,18 @@ def test_quickstart_compose_uses_split_images_and_disposable_storage(backend):
     broker = "redis" if backend == "redis" else "redpanda"
     assert compose["name"] == "oxidizer-quickstart"
     assert not compose.get("volumes")
-    assert set(compose["services"]) == {"rustfs", broker, "seed", "api", "controller", "worker"}
+    expected_services = {"rustfs", broker, "seed", "api", "controller", "worker"}
+    if backend == "redis":
+        expected_services.add("special-worker")
+    assert set(compose["services"]) == expected_services
     for name in (broker, "rustfs"):
         assert not compose["services"][name].get("volumes")
     if backend == "redis":
         assert compose["services"]["redis"]["command"] == ["redis-server", "--appendonly", "no", "--save", ""]
-    for name in ("seed", "api", "controller", "worker"):
+    runtime_services = ["seed", "controller", "worker"]
+    if backend == "redis":
+        runtime_services.append("special-worker")
+    for name in (*runtime_services, "api"):
         service = compose["services"][name]
         assert service["image"] == f"ghcr.io/moos-engineering/oxidizer-lite:{'latest-api' if name == 'api' else 'latest'}"
         assert service["pull_policy"] == "always"
@@ -54,6 +60,10 @@ def test_quickstart_compose_uses_split_images_and_disposable_storage(backend):
         assert len(service["volumes"]) == 1
     for name in ("api", "controller", "worker"):
         assert compose["services"][name]["depends_on"][broker]["condition"] == "service_healthy"
+    if backend == "redis":
+        special_worker = compose["services"]["special-worker"]
+        assert special_worker["command"][-2:] == ["--worker", "special-worker"]
+        assert special_worker["depends_on"]["redis"]["condition"] == "service_healthy"
 
 
 def test_quickstart_parquet_fixture_is_reproducible(tmp_path):

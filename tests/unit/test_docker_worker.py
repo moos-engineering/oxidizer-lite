@@ -5,6 +5,29 @@ from oxidizer import RedisConnection, Residue
 from docker.utils import helpers
 
 
+@pytest.mark.parametrize("retention", [None, "12h"])
+def test_controller_passes_configured_retention(monkeypatch, retention):
+	import runpy
+	import sys
+	from unittest.mock import Mock
+
+	import oxidizer
+
+	monkeypatch.setattr(sys, "argv", ["controller", "--config", "runtime.yml"])
+	monkeypatch.setattr(helpers, "load_config", lambda path: {"controller": {"retention": retention}})
+	monkeypatch.setattr(helpers, "create_catalyst_connection", Mock())
+	monkeypatch.setattr(helpers, "create_formula_connection", Mock())
+	monkeypatch.setattr(oxidizer, "Formula", Mock())
+	monkeypatch.setattr(oxidizer, "Catalyst", Mock())
+	controller = Mock()
+	monkeypatch.setattr(oxidizer, "Oxidizer", controller)
+
+	runpy.run_module("docker.controller", run_name="__main__")
+
+	assert controller.call_args.kwargs["retention"] == retention
+	controller.return_value.oxidize.assert_called_once_with()
+
+
 @pytest.mark.parametrize("setting", [{}, {"persist_logs": False}, {"persist_logs": True}])
 def test_catalyst_log_sink_requires_explicit_opt_in(setting):
 	class Client:

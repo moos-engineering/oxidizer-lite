@@ -75,3 +75,12 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+
+  special-worker:
+    <<: *oxidizer
+    command: ["python", "-m", "app.worker", "--config", "/example/runtime.redis.yml", "--worker", "special-worker"]
+    depends_on:
+      rustfs:
+        condition: service_started
+      redis:
+        condition: service_healthy

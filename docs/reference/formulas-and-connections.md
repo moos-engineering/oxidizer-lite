@@ -107,12 +107,74 @@ formula.create_formula_config("daily-users", config)
 
 Formula IDs are storage identifiers; the YAML `name` is descriptive and is not used to choose the storage key. The example stores the document at `formulas/daily-users.yml` under the configured S3 prefix, or `oxidizer:formulas:daily-users` in RedisJSON.
 
+### Dedicated Task Streams
+
+Workers normally share one task stream (`oxidizer:reagent`). A node may set an
+optional `task_stream` to route its tasks to workers reading a dedicated
+stream instead — for example a GPU machine:
+
+```yaml
+        - name: train_model
+          task_stream: oxidizer:reagent:gpu
+```
+
+The controller writes that node's tasks to `oxidizer:reagent:gpu`; all other
+nodes continue to use the shared stream. The stream name must match the
+`task_stream` configured for the dedicated worker (see the worker config
+example in `docker/controller+worker.yml.example`), which consumes it via
+`reagent.react(dedicated_stream=...)`.
+
 S3 workflow discovery follows continuation tokens across all pages, including
 when more than 1,000 documents are stored. Only `.yml` keys under the configured
 `formulas/` prefix are included.
 Schema and stored-analysis listings also follow all S3 pages and include only
 `.yml` keys. Analysis listings can be limited to one formula without changing
 their `<formula_id>/<run_id>` identifiers.
+
+### Redis Stream Retention
+
+Stream outputs may optionally specify `retention`:
+
+```yaml
+outputs:
+  methods:
+    - method: stream
+      retention: 12h
+```
+
+The node's output configuration is included unchanged in the controller's task
+message. After writing a non-empty output batch, the worker applies Redis
+`EXPIRE` to that output stream. The TTL is refreshed after each non-empty batch;
+empty batches do not refresh it. An explicit output `stream` name is supported.
+
+Durations accept positive integer seconds or strings such as `100s`, `5m`,
+`1h`, `12h`, `1d`, and `1w`. Invalid durations raise an error. If retention is
+omitted or null, no expiration is applied (an already-existing TTL is unchanged).
+
+**This expires the entire stream key, including all messages and consumer
+groups, not individual messages.** Continuous writes keep refreshing the TTL,
+so older entries are not removed while the stream stays active. Expiration can
+discard unread or pending messages; choose a duration longer than expected
+processing times and outages. Consumers recreate a missing stream/group on
+their next read after expiration.
+
+Control streams are configured separately in the runtime YAML:
+
+```yaml
+controller:
+  retention: 1d
+```
+
+Only the controller applies this TTL: after publishing a task to either the
+shared or a node's dedicated task stream, and after reading messages from the
+invocation or worker-update stream. Empty reads do not refresh the TTL. Workers
+do not apply retention to task/update streams. No stream discovery or registry
+is used. The Python equivalent is `Oxidizer(formula, catalyst, retention="1d")`.
+Without controller retention, it does not apply any control-stream expiration.
+
+These settings apply Redis key expiration only. Kafka does not acquire a TTL;
+its adapter warns when TTL is requested. Configure Kafka retention separately
+at the broker/topic level.
 
 ## Connection Document
 

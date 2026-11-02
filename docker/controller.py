@@ -22,5 +22,5 @@ formula_connection = create_formula_connection(formula_config, residue)
 
 formula = Formula(formula_connection, residue=residue)
 catalyst = Catalyst(catalyst_connection, residue=residue)
-oxidizer = Oxidizer(formula, catalyst, residue=residue)
+oxidizer = Oxidizer(formula, catalyst, residue=residue, retention=controller_config.get("retention"))
 oxidizer.oxidize()

@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Any
 
@@ -7,6 +8,19 @@ from .residue import Residue
 
 
 type StreamPayload = dict[str, Any] | list[Any]
+
+
+def parse_retention(value: str | int | None) -> int | None:
+    """Convert optional positive seconds or a duration (s/m/h/d/w) to seconds."""
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str):
+        match = re.fullmatch(r"([0-9]+)\s*([smhdw])", value.strip().lower())
+        if match and int(match[1]) > 0:
+            return int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match[2]]
+    raise ValueError("retention must be positive seconds or a duration such as 100s, 5m, 1h, 1d, or 1w")
 
 
 def _validate_payload(message: object) -> None:
@@ -181,7 +195,22 @@ class RedisCatalyst:
             List of ``(message_id, fields)`` pairs. Entries remain pending until
             the caller acknowledges them with :meth:`ack_message`.
         """
-        messages = self.connection.client.xreadgroup(group_name, consumer_name, {topic_name: stream_id}, count=count, block=block) 
+        from redis.exceptions import ResponseError
+
+        try:
+            messages = self.connection.client.xreadgroup(group_name, consumer_name, {topic_name: stream_id}, count=count, block=block)
+        except ResponseError as exc:
+            if not str(exc).startswith("NOGROUP"):
+                raise
+            # Key expiration also removes consumer groups.
+            self.residue.emit(
+                self.residue.ash.WARNING,
+                "CATALYST: Recreating missing stream consumer group",
+                topic_name=topic_name,
+                group_name=group_name,
+            )
+            self.create_consumer_group(topic_name, group_name)
+            messages = self.connection.client.xreadgroup(group_name, consumer_name, {topic_name: stream_id}, count=count, block=block)
         messages = [(msg_id.decode('utf-8') if isinstance(msg_id, bytes) else msg_id, {k.decode('utf-8') if isinstance(k, bytes) else k: json.loads(v) if self.is_json(v) else v.decode('utf-8') if isinstance(v, bytes) else v for k, v in msg_data.items()}) for _, msgs in messages for msg_id, msg_data in msgs]
         self.residue.emit(
             self.residue.ash.DEBUG,

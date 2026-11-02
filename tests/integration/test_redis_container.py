@@ -22,6 +22,105 @@ def test_redis_container_smoke():
         assert message_id
 
 
+def test_redis_output_retention_expires_entire_stream_and_recovers_consumers():
+    pytest.importorskip("redis")
+    testcontainers_redis = pytest.importorskip("testcontainers.community.redis")
+
+    from oxidizer import Catalyst, DataHandler, RedisConnection
+
+    with testcontainers_redis.RedisContainer("redis:7-alpine") as container:
+        connection = RedisConnection(
+            url=f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0",
+        )
+        catalyst = Catalyst(connection)
+        handler = DataHandler(catalyst=catalyst)
+        stream = "retained-output"
+        catalyst.create_consumer_group(stream, "workers")
+        method = {"method": "stream", "stream": stream, "retention": "1s"}
+        handler.outgoing_data(method, data=[{"id": 1}, {"id": 2}])
+        assert connection.client.xlen(stream) == 2
+        assert 0 < connection.client.pttl(stream) <= 1000
+        time.sleep(0.1)
+        previous_ttl = connection.client.pttl(stream)
+        handler.outgoing_data(method, data=[{"id": 3}])
+        assert connection.client.pttl(stream) > previous_ttl
+        deadline = time.monotonic() + 5
+        while connection.client.exists(stream):
+            assert time.monotonic() < deadline, "Stream did not expire"
+            time.sleep(0.05)
+
+        assert catalyst.read_from_stream(stream, "workers", "worker", block=1) == []
+        assert connection.client.xinfo_groups(stream)[0]["name"] in ("workers", b"workers")
+        message_ids = handler.outgoing_data(
+            {"method": "stream", "stream": stream}, data=[{"id": 4}],
+        )
+        assert connection.client.ttl(stream) == -1
+        assert catalyst.read_from_stream(stream, "workers", "worker", block=1) == [
+            (message_ids[0], {"message": {"id": 4}}),
+        ]
+
+
+@pytest.mark.parametrize("retention", [None, "1s"])
+def test_redis_controller_and_worker_retention_end_to_end(retention):
+    pytest.importorskip("redis")
+    testcontainers_redis = pytest.importorskip("testcontainers.community.redis")
+    from copy import deepcopy
+    from unittest.mock import Mock
+
+    from oxidizer import Catalyst, Oxidizer, Reagent, RedisConnection
+
+    with testcontainers_redis.RedisContainer("redis:7-alpine") as container:
+        connection = RedisConnection(
+            url=f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0",
+        )
+        catalyst = Catalyst(connection)
+        node_id = "ttl.layer.node"
+        stream = "oxidizer:reagent:dedicated"
+        state = {
+            "status": "pending", "connection_names": [],
+            "dag": {
+                "nodes": {node_id: {
+                    "node_name": "node", "layer_id": "ttl.layer",
+                    "task_stream": stream,
+                    "outputs": {"methods": [{"method": "stream", "retention": retention}]},
+                }},
+                "edges": {}, "reverse_edges": {}, "status": {node_id: "ready"},
+            },
+        }
+        formula = Mock()
+        formula.list_active_formula_runs.return_value = [("ttl", "run")]
+        formula.load_formula_state.side_effect = lambda *args, **kwargs: deepcopy(state)
+        formula.update_formula_state.side_effect = lambda formula_id, updated, **kwargs: state.update(updated)
+        controller = Oxidizer(formula, catalyst, retention=retention)
+        worker = Reagent(catalyst, auto_react=False)
+
+        @worker.react(dedicated_stream=stream)
+        def process(data, context):
+            return [{"id": 1}]
+
+        controller.oxidize_formulas()
+        assert connection.client.ttl(stream) == (-1 if retention is None else 1)
+        assert process() == [{"id": 1}]
+        # Workers never expire the worker-to-controller update stream.
+        assert connection.client.ttl("oxidizer:controller") == -1
+        controller.oxidize_reagent_updates(count=10, block=1)
+        assert state["status"] == "success"
+        assert connection.client.ttl("oxidizer:controller") == (-1 if retention is None else 1)
+        assert connection.client.ttl(node_id) == (-1 if retention is None else 1)
+        if retention is not None:
+            deadline = time.monotonic() + 5
+            while connection.client.exists(stream, "oxidizer:controller", node_id):
+                assert time.monotonic() < deadline, "Control or data streams did not expire"
+                time.sleep(0.05)
+            assert controller.oxidize_reagent_updates(block=1) == []
+            state["status"] = "pending"
+            state["dag"]["status"][node_id] = "ready"
+            controller.oxidize_formulas()
+            assert process() == [{"id": 1}]
+            controller.oxidize_reagent_updates(count=10, block=1)
+            assert state["status"] == "success"
+
+
 def test_redis_reconnects_and_retries_pending_message_after_restart():
     redis = pytest.importorskip("redis")
     testcontainers_redis = pytest.importorskip("testcontainers.community.redis")
