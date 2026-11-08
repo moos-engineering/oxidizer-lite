@@ -409,7 +409,8 @@ Pages for one message carry the claimed message and next offset in the cursor. T
 
 ## Stream-Triggered API Inputs
 
-An API input can take each request's endpoint or POST payload from a stream:
+An API input can take each request's endpoint, GET query parameters, or POST
+payload from a stream:
 
 ```yaml
 inputs:
@@ -420,7 +421,7 @@ inputs:
         connection: polygon_api
         input_trigger:
           type: stream
-          attribute: endpoint   # or payload (requires http_method: POST)
+          attribute: endpoint   # or params (GET), or payload (POST)
         http_method: GET
         path: $.results
         paginator: next_url
@@ -428,7 +429,46 @@ inputs:
 
 Each task claims one message from the `ref` stream (override with `input_trigger.stream`; `consumer_group`, `consumer_name`, and `block` default like stream inputs). If the record contains the `attribute` key, its value is used; otherwise the whole record is used. Endpoint values must be non-empty HTTP(S) strings, absolute or relative to the connection `base_url`. With a base URL, absolute endpoints must keep the same scheme, hostname, and effective port. Authenticated API connections require a base URL; URL credentials and automatic redirects are rejected. Configure the final endpoint explicitly. Payload triggers replace `payload` and post to the configured `endpoint`.
 
-With a `paginator`, later pages use the trigger's next URL from the checkpoint cursor. The same trigger value stays attached, so POST pages resend the same payload. The trigger message is acknowledged only after its last page's outputs and checkpoint succeed. A failed request leaves the message unacknowledged in the consumer group's pending list. As with stream inputs, it is not redelivered by new-message reads. The input becomes final when the trigger stream returns no message within `block`.
+For dynamic query parameters, set `attribute: params` and a fixed `endpoint`:
+
+```yaml
+inputs:
+  - ref: market.source.requests
+    alias: prices
+    methods:
+      - method: api
+        connection: market_api
+        endpoint: /prices
+        http_method: GET
+        input_trigger:
+          type: stream
+          attribute: params
+        path: $.results
+        paginator: $.next_page_token
+        paginator_parameter: page_token
+```
+
+A record such as `{"params": {"symbol": "AAPL", "limit": 100}}` supplies a
+mapping that **replaces** static method-level `params`; it is not merged with
+them. A record without a `params` key is used as the entire mapping. Empty
+mappings are accepted; non-mappings are rejected before making a request.
+The HTTP adapter URL-encodes the values. This trigger requires GET; POST query
+parameter triggers are not supported. The attribute is named `params`, not
+`queryparams`.
+
+With a `paginator`, later pages use the trigger's next URL from the checkpoint
+cursor. If `paginator_parameter` is configured, the next value is instead added
+to the GET query parameters under that key, overriding any value supplied by
+the trigger. The same trigger value stays attached, so GET pages retain their
+query parameters and POST pages resend the same payload. The trigger message
+is acknowledged only after its last page's outputs and checkpoint succeed. A
+failed request leaves the message unacknowledged in the consumer group's
+pending list. As with stream inputs, it is not redelivered by new-message
+reads. The input becomes final when the trigger stream returns no message
+within `block`.
+
+See the [dynamic API quickstart](../../examples/quickstart/README.md#dynamic-api-query-parameters)
+for an Open-Meteo weather workflow using `attribute: params` without an API key.
 
 ## S3 File Inputs
 

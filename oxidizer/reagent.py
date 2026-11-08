@@ -265,10 +265,12 @@ class DataHandler:
         if not isinstance(trigger, Mapping) or trigger.get("type") != "stream":
             raise ValueError("API input_trigger requires type: stream")
         attribute = trigger.get("attribute")
-        if attribute not in ("endpoint", "payload"):
-            raise ValueError("API input_trigger attribute must be endpoint or payload")
+        if attribute not in ("endpoint", "payload", "params"):
+            raise ValueError("API input_trigger attribute must be endpoint, payload, or params")
         if attribute == "payload" and request_method != "POST":
             raise ValueError("API payload triggers require http_method: POST")
+        if attribute == "params" and request_method != "GET":
+            raise ValueError("API params triggers require http_method: GET")
         return attribute
 
     def _read_trigger(
@@ -427,6 +429,10 @@ class DataHandler:
                     return InputFetchResult(data=[], is_final=True)
                 if attribute == "endpoint":
                     endpoint = trigger_state["value"]
+                elif attribute == "params":
+                    if not isinstance(trigger_state["value"], Mapping):
+                        raise ValueError("API params trigger must provide a mapping")
+                    params = dict(trigger_state["value"])
                 else:
                     payload = trigger_state["value"]
                 next_token = trigger_state.get("next")

@@ -12,6 +12,8 @@ services:
   rustfs:
     image: rustfs/rustfs:latest
     container_name: oxidizer-quickstart-rustfs
+    ports:
+      - "127.0.0.1:9001:9001"
     networks:
       default:
         aliases: [oxidizer-quickstart-rustfs.test]

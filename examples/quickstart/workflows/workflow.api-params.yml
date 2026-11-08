@@ -1,0 +1,29 @@
+templateVersion: 1
+name: quickstart_api_params
+type: workflow
+workflow:
+  layers:
+    - name: source
+      nodes:
+        - name: weather_requests
+          type: scheduled
+          outputs:
+            methods:
+              - method: stream
+    - name: weather
+      nodes:
+        - name: hourly_forecasts
+          inputs:
+            - ref: quickstart_api_params.source.weather_requests
+              alias: forecasts
+              methods:
+                - method: api
+                  connection: quickstart_weather_api
+                  endpoint: /v1/forecast
+                  http_method: GET
+                  input_trigger:
+                    type: stream
+                    attribute: params
+          outputs:
+            methods:
+              - method: stream

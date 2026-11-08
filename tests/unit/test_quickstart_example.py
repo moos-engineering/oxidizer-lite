@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from oxidizer import Crucible, Formula, S3Connection
+from oxidizer import Anvil, Crucible, DataHandler, Formula, S3Connection
 
 
 ROOT = Path(__file__).parents[2] / "examples/quickstart"
@@ -78,3 +78,151 @@ def test_quickstart_parquet_fixture_is_reproducible(tmp_path):
     assert str(table.schema.field("observed_at").type) == "timestamp[us, tz=UTC]"
     keys = [(row["entity_id"], row["observed_at"]) for row in table.to_pylist()]
     assert keys == sorted(keys)
+
+
+def test_quickstart_api_params_workflow_fetches_and_flattens_city_forecasts():
+    from fastapi import FastAPI, Request
+    from starlette.testclient import TestClient
+
+    from examples.quickstart.custom import quickstart_router
+
+    workflow = yaml.safe_load((ROOT / "workflows/workflow.api-params.yml").read_text())
+    connection = yaml.safe_load((ROOT / "connections/open-meteo.yml").read_text())
+    dag = Formula(S3Connection(bucket="unused", client=object())).dag(workflow["name"], workflow["workflow"])
+    source_id = "quickstart_api_params.source.weather_requests"
+    target_id = "quickstart_api_params.weather.hourly_forecasts"
+    assert set(dag["nodes"]) == {source_id, target_id}
+    assert dag["reverse_edges"][target_id] == [source_id]
+    method = dag["nodes"][target_id]["inputs"][0]["methods"][0]
+    assert method["connection"] == connection["name"]
+
+    class MemoryCatalyst:
+        def __init__(self):
+            self.streams = {}
+
+        def create_stream(self, stream):
+            self.streams.setdefault(stream, [])
+
+        def write_to_stream(self, stream, record):
+            self.streams[stream].append(record)
+            return f"{len(self.streams[stream])}-0"
+
+        def create_consumer_group(self, stream, group):
+            pass
+
+        def read_from_stream(self, stream, group, consumer, count, block):
+            index = len(requests) - len(pending)
+            return [(f"{index + 1}-0", {"message": pending.pop(0)})] if pending else []
+
+    catalyst = MemoryCatalyst()
+    handler = DataHandler(catalyst=catalyst)
+    requests = quickstart_router(None, {"node_name": "weather_requests", "node_id": source_id})
+    assert requests == [
+        {"params": {"latitude": 40.7128, "longitude": -74.0060, "hourly": "temperature_2m", "forecast_days": 1, "timezone": "UTC"}},
+        {"params": {"latitude": 51.5074, "longitude": -0.1278, "hourly": "temperature_2m", "forecast_days": 1, "timezone": "UTC"}},
+    ]
+    handler.outgoing_data(dag["nodes"][source_id]["outputs"]["methods"][0], data=requests, context={"node_id": source_id})
+    pending = list(requests)
+    app = FastAPI()
+    calls = []
+
+    @app.get("/v1/forecast")
+    async def forecast(request: Request):
+        calls.append(dict(request.query_params))
+        return {
+            "latitude": float(request.query_params["latitude"]),
+            "longitude": float(request.query_params["longitude"]),
+            "timezone": "GMT",
+            "hourly_units": {"temperature_2m": "C"},
+            "hourly": {
+                "time": [f"2026-11-07T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [10 + hour / 10 for hour in range(24)],
+            },
+        }
+
+    with TestClient(app) as client:
+        class Session:
+            headers = {}
+
+            def get(self, url, params=None, *, allow_redirects):
+                return client.get(url, params=params, follow_redirects=allow_redirects)
+
+        api = Anvil(connection["connection"], session=Session())
+        for message_id in ("1-0", "2-0"):
+            result = handler.incoming_data(method, api, context={"input_ref": source_id})
+            assert result.is_final is False
+            assert result.ack_msgs == [(source_id, "reagent-input-group", message_id, "reagent")]
+            forecasts = quickstart_router(result.data, {"node_name": "hourly_forecasts", "node_id": target_id})
+            handler.outgoing_data(
+                dag["nodes"][target_id]["outputs"]["methods"][0], data=forecasts, context={"node_id": target_id},
+            )
+        drained = handler.incoming_data(method, api, context={"input_ref": source_id})
+        assert drained.is_final is True
+        assert quickstart_router(drained.data, {"node_name": "hourly_forecasts", "node_id": target_id}) == []
+
+    assert calls == [
+        {key: str(value) for key, value in record["params"].items()}
+        for record in requests
+    ]
+    rows = catalyst.streams[target_id]
+    assert len(rows) == 48
+    assert rows == [
+        {
+            "latitude": record["params"]["latitude"],
+            "longitude": record["params"]["longitude"],
+            "forecast_at": f"2026-11-07T{hour:02d}:00",
+            "timezone": "GMT",
+            "temperature_2m": 10 + hour / 10,
+            "temperature_unit": "C",
+        }
+        for record in requests
+        for hour in range(24)
+    ]
+
+
+@pytest.mark.parametrize("data", [
+    [{"invalid": True}], None, "invalid", {}, {"hourly": {}},
+    {"latitude": 1, "longitude": 2, "timezone": "GMT", "hourly_units": {"temperature_2m": "C"},
+     "hourly": {"time": ["2026-11-07T00:00"], "temperature_2m": []}},
+])
+def test_quickstart_hourly_forecasts_rejects_invalid_response(data):
+    from examples.quickstart.custom import hourly_forecasts
+
+    with pytest.raises(ValueError, match="hourly_forecasts"):
+        hourly_forecasts(data, {})
+
+
+@pytest.mark.parametrize("backend", ["redis", "kafka"])
+def test_quickstart_seed_publishes_api_params_workflow_and_connection(backend, monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(ROOT))
+    from examples.quickstart import seed
+
+    documents = []
+
+    class Storage:
+        def list_buckets(self):
+            return {}
+
+        def head_bucket(self, **kwargs):
+            return {}
+
+        def put_object(self, **kwargs):
+            documents.append((kwargs["Key"], yaml.safe_load(kwargs["Body"])))
+
+        def upload_file(self, *args):
+            assert args == (str(tmp_path / "observations.parquet"), "quickstart-data", "quickstart/observations.parquet")
+
+    monkeypatch.setattr(seed, "_document", lambda filename: yaml.safe_load((ROOT / filename).read_text()))
+    monkeypatch.setattr(seed, "ROOT", tmp_path)
+    monkeypatch.setattr(seed.boto3, "client", lambda *args, **kwargs: Storage())
+    monkeypatch.setattr(seed, "_enable_tables", lambda *args: None)
+    (tmp_path / "observations.parquet").write_bytes(b"fixture")
+    seed.main(ROOT / f"runtime.{backend}.yml")
+    assert {document["name"] for _, document in documents} == {
+        f"quickstart_observations_{backend}", "quickstart_api_params", "quickstart_weather_api",
+        "quickstart_files", "quickstart_lake", "quickstart_observation_upsert", "quickstart_observation_history",
+    }
+    assert (
+        "quickstart/formulas/quickstart_api_params.yml",
+        yaml.safe_load((ROOT / "workflows/workflow.api-params.yml").read_text()),
+    ) in documents

@@ -15,6 +15,7 @@ The Markdown pages are included in the installed `oxidizer` package and are avai
 - **The REST API or MCP tools are unavailable or return unexpected data:** check [Topology API and MCP tools](reference/topology-api-and-tools.md).
 - **An LLM needs version-matched documentation:** use semantic MCP `search_docs` and `read_doc`; check `get_docs_search_status` first. See [Documentation lookup](reference/topology-api-and-tools.md#documentation-lookup) and the [API image guide](../docker/README.md).
 - **A workflow reference, connection, or input configuration is rejected:** see [Formulas and connections](reference/formulas-and-connections.md).
+- **You need dynamic API query parameters from upstream records:** see [Stream-triggered API inputs](reference/formulas-and-connections.md#stream-triggered-api-inputs) and the [runnable quickstart](../examples/quickstart/README.md#dynamic-api-query-parameters).
 - **A table write fails or produces unexpected history:** see [Designing schema configurations](reference/schema-configurations.md), the [Schema contract](reference/schema-contract.md), and [Table write modes](reference/table-write-modes.md).
 - **You need an approved production restart, backup/restore, or replay procedure:** use [Production Recovery](operations/production-recovery.md).
 
