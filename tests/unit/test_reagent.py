@@ -859,7 +859,8 @@ def test_api_payload_trigger_posts_stream_record_and_empty_stream_is_final():
 
 @pytest.mark.parametrize(
     "trigger,http_method",
-    [({"type": "kafka", "attribute": "endpoint"}, "GET"), ({"type": "stream", "attribute": "params"}, "GET"),
+    [({"type": "kafka", "attribute": "endpoint"}, "GET"), ({"type": "stream", "attribute": "queryparams"}, "GET"),
+     ({"type": "stream", "attribute": "params"}, "POST"),
      ({"type": "stream", "attribute": "payload"}, "GET")],
 )
 def test_api_trigger_rejects_invalid_config(trigger, http_method):
@@ -869,6 +870,89 @@ def test_api_trigger_rejects_invalid_config(trigger, http_method):
             FakeAnvil({}),
             context={"input_ref": "s"},
         )
+
+
+@pytest.mark.parametrize("paginator_parameter", [None, "page_token"])
+def test_api_params_trigger_replaces_static_params_and_preserves_them_across_pages(paginator_parameter):
+    value = {"symbol": "AAPL", "limit": 2}
+    catalyst = FakeCatalyst(batches={"requests": [[("1-0", {"message": {"params": value}})], []]})
+    handler = DataHandler(catalyst=catalyst)
+    method = {
+        "method": "api",
+        "endpoint": "/items",
+        "params": {"symbol": "ignored", "static_only": True},
+        "input_trigger": {"type": "stream", "attribute": "params"},
+        "path": "$.items",
+        "paginator": "$.next",
+    }
+    if paginator_parameter:
+        method["paginator_parameter"] = paginator_parameter
+    context = {"input_ref": "requests"}
+    next_page = "page-2" if paginator_parameter else "/items?page=2"
+    first_api = FakeAnvil({"items": [{"id": 1}], "next": next_page})
+    first = handler.incoming_data(method, first_api, context=context)
+    assert first_api.calls == [("GET", "/items", value)]
+    assert first.data == [{"id": 1}]
+    assert first.ack_msgs == []
+    assert first.next_cursor["value"] == value
+
+    second_api = FakeAnvil({"items": [{"id": 2}]})
+    second = handler.incoming_data(method, second_api, context={**context, "cursor": first.next_cursor})
+    expected_params = {**value, "page_token": next_page} if paginator_parameter else value
+    assert second_api.calls == [("GET", "/items" if paginator_parameter else next_page, expected_params)]
+    assert second.data == [{"id": 2}]
+    assert second.is_final is False
+    assert second.next_cursor is None
+    assert second.ack_msgs == [("requests", "reagent-input-group", "1-0", "reagent")]
+    assert value == {"symbol": "AAPL", "limit": 2}
+    assert method["params"] == {"symbol": "ignored", "static_only": True}
+    assert len(catalyst.reads) == 1
+
+    done = handler.incoming_data(method, second_api, context=context)
+    assert done.data == []
+    assert done.is_final is True
+    assert len(second_api.calls) == 1
+
+
+@pytest.mark.parametrize("record", [{"stream_name": "tasks"}, {"params": {}}])
+def test_api_params_trigger_accepts_whole_record_and_empty_mapping(record):
+    api = FakeAnvil({"ok": True})
+    result = DataHandler(catalyst=FakeCatalyst(messages=[("1-0", {"message": record})])).incoming_data(
+        {"method": "api", "endpoint": "/health", "input_trigger": {"type": "stream", "attribute": "params"}},
+        api,
+        context={"input_ref": "requests"},
+    )
+    assert api.calls == [("GET", "/health", record.get("params", record) or None)]
+    assert result.ack_msgs == [("requests", "reagent-input-group", "1-0", "reagent")]
+
+
+@pytest.mark.parametrize("value", [None, [], "symbol=AAPL", 1])
+def test_api_params_trigger_rejects_non_mapping_without_request_or_ack(value):
+    catalyst = FakeCatalyst(messages=[("1-0", {"message": {"params": value}})])
+    api = FakeAnvil({})
+    with pytest.raises(ValueError, match="API params trigger must provide a mapping"):
+        DataHandler(catalyst=catalyst).incoming_data(
+            {"method": "api", "endpoint": "/items", "input_trigger": {"type": "stream", "attribute": "params"}},
+            api,
+            context={"input_ref": "requests"},
+        )
+    assert api.calls == []
+    assert catalyst.acks == []
+
+
+def test_api_params_trigger_request_failure_leaves_message_unacknowledged():
+    class FailingApi(FakeAnvil):
+        def get(self, endpoint, params=None):
+            raise RuntimeError("API unavailable")
+
+    catalyst = FakeCatalyst(messages=[("1-0", {"message": {"params": {"limit": 2}}})])
+    with pytest.raises(RuntimeError, match="API unavailable"):
+        DataHandler(catalyst=catalyst).incoming_data(
+            {"method": "api", "endpoint": "/items", "input_trigger": {"type": "stream", "attribute": "params"}},
+            FailingApi({}),
+            context={"input_ref": "requests"},
+        )
+    assert catalyst.acks == []
 
 
 def test_data_handler_reads_stream_batch_and_returns_deferred_acks():

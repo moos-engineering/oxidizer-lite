@@ -43,9 +43,51 @@ def transform_observation_history(data, context):
     return data
 
 
+def weather_requests(data, context):
+    return [
+        {"params": {
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "temperature_2m",
+            "forecast_days": 1,
+            "timezone": "UTC",
+        }}
+        for latitude, longitude in ((40.7128, -74.0060), (51.5074, -0.1278))
+    ]
+
+
+def hourly_forecasts(data, context):
+    if isinstance(data, list) and not data:
+        return []
+    if not isinstance(data, dict):
+        raise ValueError("hourly_forecasts expects an API response object")
+    hourly = data.get("hourly")
+    units = data.get("hourly_units")
+    if not isinstance(hourly, dict) or not isinstance(units, dict) or "temperature_2m" not in units:
+        raise ValueError("hourly_forecasts requires hourly forecast data and temperature units")
+    if any(key not in data for key in ("latitude", "longitude", "timezone")):
+        raise ValueError("hourly_forecasts requires coordinates and timezone")
+    times, temperatures = hourly.get("time"), hourly.get("temperature_2m")
+    if not isinstance(times, list) or not isinstance(temperatures, list) or len(times) != len(temperatures):
+        raise ValueError("hourly_forecasts requires matching time and temperature arrays")
+    return [
+        {
+            "latitude": data["latitude"],
+            "longitude": data["longitude"],
+            "forecast_at": timestamp,
+            "timezone": data["timezone"],
+            "temperature_2m": temperature,
+            "temperature_unit": units["temperature_2m"],
+        }
+        for timestamp, temperature in zip(times, temperatures, strict=True)
+    ]
+
+
 NODE_ROUTES = {
     "raw_observations": raw_observations,
     "transform_observation_history": transform_observation_history,
+    "weather_requests": weather_requests,
+    "hourly_forecasts": hourly_forecasts,
 }
 
 

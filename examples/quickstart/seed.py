@@ -50,6 +50,7 @@ def main(config_path=ROOT / "runtime.redis.yml"):
     documents = [workflow] + [
         _document(filename)
         for filename in (
+            "workflows/workflow.api-params.yml", "connections/open-meteo.yml",
             "connections/local-files.yml", "connections/local-lake.yml",
             "schemas/upsert-observations.yml", "schemas/observation-history.yml",
         )
@@ -95,6 +96,7 @@ def main(config_path=ROOT / "runtime.redis.yml"):
         print(f"Seeded {key}", flush=True)
     client.upload_file(str(fixture), seed["data_bucket"], seed["data_key"])
     print(f"Ready to invoke {workflow['name']}", flush=True)
+    print("Ready to invoke quickstart_api_params", flush=True)
 
 
 if __name__ == "__main__":

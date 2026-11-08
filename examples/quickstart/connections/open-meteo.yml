@@ -1,0 +1,6 @@
+templateVersion: 1
+name: quickstart_weather_api
+type: connection
+connection:
+  type: api
+  base_url: https://api.open-meteo.com
