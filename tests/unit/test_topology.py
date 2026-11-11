@@ -435,6 +435,29 @@ def test_topology_lists_only_s3_tables_connection_names():
     assert client.get("/api/connections").json() == {"connections": []}
 
 
+def test_topology_connection_listing_filters_types():
+    topology = Topology(FakeFormula(), FakeCatalyst())
+    topology.register_api_endpoints()
+    client = TestClient(topology.app)
+    for kind in ("redis", "kafka", "redpanda", "msk", "confluent"):
+        topology.formula.connections[kind] = {"connection": {"type": kind, "password": "private"}}
+    response = client.get("/api/connections", params=[("type", "redis"), ("type", "kafka")])
+    assert response.status_code == 200
+    assert response.json() == {"connections": ["kafka", "redis"]}
+    assert "private" not in response.text
+    assert client.get("/api/connections?type=s3_tables").json() == {"connections": ["aws_lake", "rustfs_lake"]}
+    assert client.get("/api/connections?type=api").json() == {"connections": ["users_api"]}
+    assert client.get("/api/connections?type=unknown").json() == {"connections": []}
+    assert client.get("/api/connections?type=stream").json() == {"connections": []}
+    topology.formula.connections["stream_events"] = {"connection": {"type": "stream"}}
+    assert client.get("/api/connections?type=stream").json() == {"connections": ["stream_events"]}
+    assert client.get("/api/connections?type=").status_code == 400
+    assert client.get("/api/connections?type=%20").status_code == 400
+    response = client.get("/api/connections", params=[("type", kind) for kind in
+                                                    ("redis", "kafka", "redpanda", "msk", "confluent")])
+    assert response.json() == {"connections": ["confluent", "kafka", "msk", "redis", "redpanda"]}
+
+
 def test_topology_connection_listing_failure_does_not_expose_credentials(monkeypatch):
     topology = Topology(FakeFormula(), FakeCatalyst())
     topology.register_api_endpoints()
