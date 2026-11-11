@@ -68,6 +68,9 @@ class FakeFormula:
     def list_formula_connections(self):
         return list(self.connections)
 
+    def list_formula_schemas(self):
+        return ["weather_history", "orders"]
+
     def load_formula_connection(self, name):
         return self.connections[name]
 
@@ -415,6 +418,23 @@ def test_documentation_search_readiness_matches_rest_and_mcp(tmp_path):
     with pytest.raises(ToolError, match="documentation_search_unavailable"):
         asyncio.run(topology.mcp.call_tool("search_docs", {"query": "pending"}))
     assert client.get("/api/health").status_code == 200
+
+
+def test_registered_schema_listing_and_failures(monkeypatch):
+    topology = Topology(FakeFormula(), FakeCatalyst())
+    topology.register_api_endpoints()
+    client = TestClient(topology.app)
+    assert client.get("/api/schemas").json() == {"schemas": ["orders", "weather_history"]}
+    monkeypatch.setattr(topology.formula, "list_formula_schemas", lambda: [])
+    assert client.get("/api/schemas").json() == {"schemas": []}
+
+    def fail():
+        raise RuntimeError("private storage details")
+
+    monkeypatch.setattr(topology.formula, "list_formula_schemas", fail)
+    response = client.get("/api/schemas")
+    assert response.status_code == 503
+    assert response.json() == {"error": "Unable to list registered schemas"}
 
 
 def test_topology_lists_only_s3_tables_connection_names():

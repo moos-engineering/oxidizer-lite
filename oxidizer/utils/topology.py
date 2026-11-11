@@ -45,6 +45,10 @@ class Topology:
 	def list_formulas(self) -> list[str]:
 		return self.formula.list_formula_configs()
 
+	def list_registered_schemas(self) -> list[str]:
+		"""List names of stored schema documents used by table outputs."""
+		return sorted(self.formula.list_formula_schemas())
+
 	def list_connections(self, connection_types: list[str] | None = None) -> list[str]:
 		"""List stored connection names matching types without exposing settings."""
 		types = set(connection_types if connection_types is not None else ["s3_tables"])
@@ -360,6 +364,13 @@ class Topology:
 		@self.app.get("/api/formulas", name="api_list_formulas")
 		async def api_list_formulas(request: Request):
 			return JSONResponse({"formulas": self.list_formulas()})
+
+		@self.app.get("/api/schemas", name="api_list_registered_schemas")
+		async def api_list_registered_schemas(request: Request):
+			try:
+				return JSONResponse({"schemas": self.list_registered_schemas()})
+			except Exception:
+				return JSONResponse({"error": "Unable to list registered schemas"}, status_code=503)
 
 		@self.app.get("/api/connections", name="api_list_connections")
 		async def api_list_connections(request: Request):

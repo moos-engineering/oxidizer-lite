@@ -107,6 +107,7 @@ Example response:
 | `GET /api/docs/status` | Documentation search readiness, hybrid mode, model identity, and structured error; HTTP 503 when unavailable. |
 | `GET /api/transport/health?stream_name=...&group_name=...` | Read-only primary-Catalyst metadata for one stream/topic; group is optional. |
 | `GET /api/connections` | `{"connections":["..."]}` containing connection names sorted by name. Optional repeated `type` filters match stored connection types (e.g. `?type=redis&type=kafka`); omitted filters select `s3_tables`. Empty filters return 400. Settings and credentials are never returned. |
+| `GET /api/schemas` | `{"schemas":["..."]}` containing registered schema document names sorted by name. |
 | `GET /api/connections/{connection_name}/schemas` | Iceberg namespaces/SQL schemas and table metadata from Crucible. |
 | `POST /api/connections/{connection_name}/query` | Bounded SQL query results from Crucible; body includes `sql` and optional `max_rows`. |
 | `GET /api/formulas/{formula_id}/runs` | Formula ID and normalized run records containing `formula_id`, `run_id`, `status`, `started_at`, and `completed_at`. |
@@ -152,7 +153,7 @@ Both routes resolve a stored Formula connection with `connection.type: s3_tables
 }
 ```
 
-Iceberg namespaces are SQL schemas, so `namespaces` and `schemas` contain the same names. Discovery follows Crucible's existing 1,000-row limit per metadata query; this is not a paginated catalog listing.
+Iceberg namespaces are SQL schemas, so `namespaces` and `schemas` contain the same names. Discovery follows Crucible's existing 1,000-row limit per metadata query; this is not a paginated catalog listing. These are distinct from the registered schema documents listed by `GET /api/schemas`, which are referenced by table outputs. That endpoint returns names only, an empty list if none exist, and HTTP 503 with a generic error if storage listing fails.
 
 Run a query using the returned catalog/schema/table names:
 
