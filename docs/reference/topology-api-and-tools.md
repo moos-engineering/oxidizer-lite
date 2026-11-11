@@ -106,7 +106,7 @@ Example response:
 | `GET /api/formulas` | `{"formulas":["..."]}` |
 | `GET /api/docs/status` | Documentation search readiness, hybrid mode, model identity, and structured error; HTTP 503 when unavailable. |
 | `GET /api/transport/health?stream_name=...&group_name=...` | Read-only primary-Catalyst metadata for one stream/topic; group is optional. |
-| `GET /api/connections` | `{"connections":["..."]}` containing only S3 Tables connection names, sorted by name. |
+| `GET /api/connections` | `{"connections":["..."]}` containing connection names sorted by name. Optional repeated `type` filters match stored connection types (e.g. `?type=redis&type=kafka`); omitted filters select `s3_tables`. Empty filters return 400. Settings and credentials are never returned. |
 | `GET /api/connections/{connection_name}/schemas` | Iceberg namespaces/SQL schemas and table metadata from Crucible. |
 | `POST /api/connections/{connection_name}/query` | Bounded SQL query results from Crucible; body includes `sql` and optional `max_rows`. |
 | `GET /api/formulas/{formula_id}/runs` | Formula ID and normalized run records containing `formula_id`, `run_id`, `status`, `started_at`, and `completed_at`. |

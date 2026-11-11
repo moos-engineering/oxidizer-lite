@@ -45,13 +45,16 @@ class Topology:
 	def list_formulas(self) -> list[str]:
 		return self.formula.list_formula_configs()
 
-	def list_connections(self) -> list[str]:
-		"""List stored S3 Tables connection names without exposing their settings."""
+	def list_connections(self, connection_types: list[str] | None = None) -> list[str]:
+		"""List stored connection names matching types without exposing settings."""
+		types = set(connection_types if connection_types is not None else ["s3_tables"])
+		if not types or any(not isinstance(value, str) or not value.strip() for value in types):
+			raise ValueError("Connection types must be nonempty strings")
 		connections = []
 		for name in self.formula.list_formula_connections():
 			document = self.formula.load_formula_connection(name)
 			settings = document.get("connection") if isinstance(document, Mapping) else None
-			if isinstance(settings, Mapping) and settings.get("type") == "s3_tables":
+			if isinstance(settings, Mapping) and settings.get("type") in types:
 				connections.append(name)
 		return sorted(connections)
 
@@ -361,7 +364,10 @@ class Topology:
 		@self.app.get("/api/connections", name="api_list_connections")
 		async def api_list_connections(request: Request):
 			try:
-				return JSONResponse({"connections": self.list_connections()})
+				types = request.query_params.getlist("type") or None
+				return JSONResponse({"connections": self.list_connections(types)})
+			except ValueError:
+				return JSONResponse({"error": "Connection types must be nonempty strings"}, status_code=400)
 			except Exception:
 				return JSONResponse({"error": "Unable to list connections"}, status_code=503)
 
