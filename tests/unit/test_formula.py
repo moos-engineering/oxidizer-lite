@@ -344,6 +344,107 @@ def test_formula_persists_named_schema_documents_in_s3_yaml():
     assert ("demo", "formulae/schemas/market_quotes.yml") in client.objects
 
 
+def test_named_sql_round_trips_and_lists_in_both_backends(indexed_formula):
+    formula = indexed_formula
+    sql = "SELECT id FROM lake.main.orders WHERE id >= ? ORDER BY id\n"
+    formula.create_formula_sql("orders", sql)
+    formula.create_formula_sql("another-query", "SELECT 1")
+
+    assert formula.list_formula_sql() == ["another-query", "orders"]
+    assert formula.load_formula_sql("orders") == sql
+    if formula.formula.backend == "s3":
+        assert formula.connection.client.objects[("demo", "formulae/sql/orders.sql")] == sql.encode()
+    else:
+        assert formula.connection.client.values["oxidizer:sql:orders"] == sql
+
+
+def test_named_sql_is_pinned_during_invocation_on_both_backends(indexed_formula):
+    from oxidizer import Oxidizer
+
+    class InvocationCatalyst:
+        def __init__(self):
+            self.acks = []
+            self.writes = []
+
+        def create_consumer_group(self, *args):
+            pass
+
+        def create_stream(self, *args):
+            pass
+
+        def read_from_stream(self, *args, **kwargs):
+            return [("1-0", {"message": {"formula_id": "orders", "run_id": "run-1"}})]
+
+        def ack_message(self, *args, **kwargs):
+            self.acks.append(args)
+
+        def write_to_stream(self, topic_name, message):
+            self.writes.append(message)
+
+    formula = indexed_formula
+    formula.create_formula_sql("orders", "SELECT 1")
+    formula.create_formula_config("orders", {"layers": [{
+        "name": "source", "nodes": [{"name": "read", "type": "scheduled", "inputs": [
+            {"methods": [{"method": "sql", "sql_name": "orders"}]},
+        ]}],
+    }]})
+    catalyst = InvocationCatalyst()
+    oxidizer = Oxidizer(formula, catalyst)
+    oxidizer.oxidize_invocations()
+    formula.create_formula_sql("orders", "SELECT 2")
+    oxidizer.oxidize_formulas()
+    assert catalyst.acks
+    assert catalyst.writes[-1]["node"]["inputs"][0]["methods"][0]["query"] == "SELECT 1"
+    assert formula.load_formula_state("orders", "run-1")["dag"]["nodes"]["orders.source.read"]["inputs"][0]["methods"][0]["query"] == "SELECT 1"
+
+
+@pytest.mark.parametrize("name", ["", "../orders", "orders/nested", "bad:name", "bad name"])
+def test_named_sql_rejects_invalid_names(indexed_formula, name):
+    with pytest.raises(ValueError, match="SQL name"):
+        indexed_formula.create_formula_sql(name, "SELECT 1")
+    with pytest.raises(ValueError, match="SQL name"):
+        indexed_formula.load_formula_sql(name)
+
+
+@pytest.mark.parametrize("sql", ["", "  ", None, {"query": "SELECT 1"}])
+def test_named_sql_rejects_invalid_text(indexed_formula, sql):
+    with pytest.raises(ValueError, match="non-empty string"):
+        indexed_formula.create_formula_sql("orders", sql)
+
+
+def test_named_sql_missing_or_invalid_storage_is_not_silently_accepted(indexed_formula):
+    formula = indexed_formula
+    if formula.formula.backend == "s3":
+        with pytest.raises(KeyError):
+            formula.load_formula_sql("missing")
+        formula.connection.client.objects[("demo", "formulae/sql/empty.sql")] = b"  "
+    else:
+        with pytest.raises(ValueError, match="SQL not found"):
+            formula.load_formula_sql("missing")
+        formula.connection.client.values["oxidizer:sql:empty"] = "  "
+    with pytest.raises(ValueError, match="non-empty string"):
+        formula.load_formula_sql("empty")
+
+
+def test_s3_sql_listing_paginates_and_ignores_other_files():
+    class PaginatedClient(FakeS3Client):
+        def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+            keys = sorted(key for bucket, key in self.objects if bucket == Bucket and key.startswith(Prefix))
+            offset = int(ContinuationToken or 0)
+            response = {"Contents": [{"Key": key} for key in keys[offset:offset + 1]],
+                        "IsTruncated": offset + 1 < len(keys)}
+            if response["IsTruncated"]:
+                response["NextContinuationToken"] = str(offset + 1)
+            return response
+
+    client = PaginatedClient()
+    formula = Formula(S3Connection(bucket="demo", prefix="formulae", client=client))
+    formula.create_formula_sql("z", "SELECT 1")
+    formula.create_formula_sql("a", "SELECT 2")
+    client.put_object(Bucket="demo", Key="formulae/sql/ignore.txt", Body=b"ignored")
+    assert formula.list_formula_sql() == ["a", "z"]
+
+
 def test_formula_uses_redis_json_backend_with_run_scoped_state():
     client = FakeRedisClient()
     connection = RedisConnection(client=client)

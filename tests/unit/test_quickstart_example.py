@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,17 @@ def test_quickstart_bronze_silver_workflow_and_schemas(backend):
     assert workflow["name"] == f"quickstart_observations_{backend}"
     dag = Formula(S3Connection(bucket="unused", client=object())).dag(workflow["name"], workflow["workflow"])
     source_id = f"{workflow['name']}.bronze.raw_observations"
+    sql_id = f"{workflow['name']}.silver.read_observations"
     history_id = f"{workflow['name']}.silver.transform_observation_history"
-    assert set(dag["nodes"]) == {source_id, history_id}
-    assert dag["reverse_edges"][history_id] == [source_id]
+    assert set(dag["nodes"]) == {source_id, sql_id, history_id}
+    assert dag["reverse_edges"][sql_id] == [source_id]
+    assert dag["reverse_edges"][history_id] == [sql_id]
+    assert [method["method"] for method in dag["nodes"][source_id]["outputs"]["methods"]] == ["s3_tables"]
+    sql_method = dag["nodes"][sql_id]["inputs"][0]["methods"][0]
+    assert sql_method["sql_name"] == "quickstart_observations"
+    assert sql_method["catalogs"] == [{"connection": "quickstart_lake", "catalog": "local_catalog"}]
+    assert dag["nodes"][sql_id]["outputs"]["methods"][0]["method"] == "stream"
+    assert dag["nodes"][history_id]["inputs"][0]["methods"][0]["method"] == "stream"
     schemas = {
         document["name"]: document
         for document in (yaml.safe_load(path.read_text()) for path in (ROOT / "schemas").glob("*.yml"))
@@ -31,6 +40,73 @@ def test_quickstart_bronze_silver_workflow_and_schemas(backend):
     if backend == "kafka":
         assert runtime["catalyst"]["consumer_config"]["enable.auto.commit"] is False
         assert runtime["controller"]["kafka_group_id"] != runtime["worker"]["kafka_group_id"]
+
+
+@pytest.mark.parametrize("backend", ["redis", "kafka"])
+def test_quickstart_named_sql_pages_feed_json_stream_to_history(backend, monkeypatch):
+    pytest.importorskip("duckdb")
+    from examples.quickstart.custom import quickstart_router
+
+    workflow = yaml.safe_load((ROOT / f"workflows/workflow.{backend}.yml").read_text())
+    dag = Formula(S3Connection(bucket="unused", client=object())).dag(workflow["name"], workflow["workflow"])
+    sql_id = f"{workflow['name']}.silver.read_observations"
+    sql_node = dag["nodes"][sql_id]
+    method = dict(sql_node["inputs"][0]["methods"][0])
+    method["query"] = (ROOT / f"sql/{method['sql_name']}.sql").read_text()
+    method["batch_size"] = 2
+    connection = yaml.safe_load((ROOT / "connections/local-lake.yml").read_text())
+
+    def attach(crucible, bucket, catalog):
+        engine = crucible.adapter.engine
+        engine.execute(f"ATTACH ':memory:' AS {catalog}")
+        engine.execute(f"CREATE SCHEMA {catalog}.analytics")
+        engine.execute(f"""
+            CREATE TABLE {catalog}.analytics.quickstart_observation_upsert AS
+            SELECT 'entity-1' AS entity_id,
+                   TIMESTAMPTZ '2026-01-01 00:00:00+00' + range * INTERVAL '1 hour' AS observed_at,
+                   TIMESTAMPTZ '2026-10-01 00:00:00+00' AS source_revision,
+                   1.5::DOUBLE AS metric_value, 'nominal' AS status, range AS reading
+            FROM range(3)
+        """)
+
+    monkeypatch.setattr(Crucible, "attach", attach)
+
+    class MemoryCatalyst:
+        def __init__(self):
+            self.messages = []
+
+        def create_stream(self, stream):
+            assert stream == sql_id
+
+        def write_to_stream(self, stream, record):
+            self.messages.append(json.loads(json.dumps(record)))
+            return f"{len(self.messages)}-0"
+
+        def set_ttl(self, stream, message_id, ttl):
+            assert stream == sql_id and ttl == 180
+
+        def create_consumer_group(self, stream, group):
+            assert stream == sql_id
+
+        def read_from_stream(self, stream, group, consumer, count, block):
+            return [(f"{index + 1}-0", {"message": record}) for index, record in enumerate(self.messages[:count])]
+
+    catalyst = MemoryCatalyst()
+    handler = DataHandler(catalyst=catalyst)
+    catalogs = handler._task_connection(method, {"quickstart_lake": connection})
+    first = handler.incoming_data(method, catalogs)
+    second = handler.incoming_data(method, catalogs, context={"cursor": first.next_cursor})
+    assert not first.is_final and second.is_final
+    assert [len(first.data), len(second.data)] == [2, 1]
+    for page in (first.data, second.data):
+        rows = quickstart_router(page, {"node_name": "read_observations", "node_id": sql_id})
+        handler.outgoing_data(sql_node["outputs"]["methods"][0], data=rows, context={"node_id": sql_id})
+    history_id = f"{workflow['name']}.silver.transform_observation_history"
+    history_method = dag["nodes"][history_id]["inputs"][0]["methods"][0]
+    history_rows = handler.incoming_data(history_method, context={"input_ref": sql_id}).data
+    assert [row["reading"] for row in history_rows] == [0, 1, 2]
+    assert all(row["observed_at"].endswith("Z") and row["source_revision"].endswith("Z") for row in history_rows)
+    assert quickstart_router(history_rows, {"node_name": "transform_observation_history"}) == history_rows
 
 
 @pytest.mark.parametrize("backend", ["redis", "kafka"])
@@ -198,6 +274,7 @@ def test_quickstart_seed_publishes_api_params_workflow_and_connection(backend, m
     from examples.quickstart import seed
 
     documents = []
+    sql_objects = []
 
     class Storage:
         def list_buckets(self):
@@ -207,7 +284,10 @@ def test_quickstart_seed_publishes_api_params_workflow_and_connection(backend, m
             return {}
 
         def put_object(self, **kwargs):
-            documents.append((kwargs["Key"], yaml.safe_load(kwargs["Body"])))
+            if kwargs["Key"].endswith(".sql"):
+                sql_objects.append(kwargs)
+            else:
+                documents.append((kwargs["Key"], yaml.safe_load(kwargs["Body"])))
 
         def upload_file(self, *args):
             assert args == (str(tmp_path / "observations.parquet"), "quickstart-data", "quickstart/observations.parquet")
@@ -217,6 +297,10 @@ def test_quickstart_seed_publishes_api_params_workflow_and_connection(backend, m
     monkeypatch.setattr(seed.boto3, "client", lambda *args, **kwargs: Storage())
     monkeypatch.setattr(seed, "_enable_tables", lambda *args: None)
     (tmp_path / "observations.parquet").write_bytes(b"fixture")
+    (tmp_path / "sql").mkdir()
+    (tmp_path / "sql/quickstart_observations.sql").write_text(
+        (ROOT / "sql/quickstart_observations.sql").read_text()
+    )
     seed.main(ROOT / f"runtime.{backend}.yml")
     assert {document["name"] for _, document in documents} == {
         f"quickstart_observations_{backend}", "quickstart_api_params", "quickstart_weather_api",
@@ -226,3 +310,9 @@ def test_quickstart_seed_publishes_api_params_workflow_and_connection(backend, m
         "quickstart/formulas/quickstart_api_params.yml",
         yaml.safe_load((ROOT / "workflows/workflow.api-params.yml").read_text()),
     ) in documents
+    assert sql_objects == [{
+        "Bucket": "quickstart-configs",
+        "Key": "quickstart/sql/quickstart_observations.sql",
+        "Body": (ROOT / "sql/quickstart_observations.sql").read_bytes(),
+        "ContentType": "application/sql",
+    }]

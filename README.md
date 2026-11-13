@@ -26,8 +26,9 @@ See [workflows and connections](docs/reference/formulas-and-connections.md),
 
 ## Quickstart
 
-The supplied Redis demo reads a million-row Parquet fixture and writes Iceberg
-upsert and history tables using local RustFS storage.
+The supplied Redis demo reads a million-row Parquet fixture, writes an Iceberg
+upsert table, then reads it using named SQL to build a history table in local
+RustFS storage.
 
 From the repository root:
 

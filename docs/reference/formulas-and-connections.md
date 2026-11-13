@@ -373,6 +373,39 @@ inputs:
 
 The controller's existing recursive reference resolution loads all bindings into `TaskMessage.connections`. Crucible attaches them to a single DuckDB engine for the page, so DuckDB executes the join; it does not fetch separate pages and join them in Python. Connections may use AWS S3 Tables or RustFS Iceberg REST settings, each with its own credentials, warehouse, and catalog endpoint. Catalog aliases must be identifier-safe and unique; missing bindings, non-S3 Tables connections, or connections without `aws_s3_table_bucket` are rejected. Use distinct storage bucket paths when separate RustFS endpoints need different credentials; DuckDB's S3 secret scopes are URI-path based, not endpoint-isolated.
 
+### Named SQL
+
+Instead of embedding `query`, store SQL text in the Formula backend and refer to it by `sql_name`:
+
+```python
+from pathlib import Path
+
+formula.create_formula_sql("enriched_orders", Path("enriched_orders.sql").read_text(encoding="utf-8"))
+assert "enriched_orders" in formula.list_formula_sql()
+sql = formula.load_formula_sql("enriched_orders")
+```
+
+```yaml
+inputs:
+  - alias: enriched
+    methods:
+      - method: sql
+        catalogs:
+          - connection: sales_lake
+            catalog: sales
+          - connection: people_lake
+            catalog: people
+        sql_name: enriched_orders
+        parameters: [100]
+        batch_size: 1000
+```
+
+S3 stores the text as UTF-8 at `sql/enriched_orders.sql` under the configured prefix. Redis stores it as a RedisJSON string at `oxidizer:sql:enriched_orders`. These are namespaces, not physical directories; they appear when a query is stored. Use the base name without the `.sql` extension; S3 appends it. Names may contain letters, digits, underscores, hyphens, and dots, starting with a letter, digit, or underscore.
+
+Specify either `query` or `sql_name`, not both. The controller loads named SQL once per invocation and saves the text in the run's DAG before acknowledging the invocation. Missing, empty, or non-string stored text fails preparation. Changes to a stored query affect new runs, not pages or retries of an existing run. Stored query text is included in run state and worker messages; do not put credentials in it. At execution, the same SQL guard, parameters, and pagination rules apply to inline and named queries.
+
+### SQL Validation and Paging
+
 `query` must be a single SELECT/WITH statement accepted by Crucible's existing query guard. `parameters` is an optional list of positional values. `batch_size` defaults to 1,000 and must be a positive integer. This workflow batch size is independent of the interactive API query's 1,000-row response cap. Large pages and joins can consume significant memory; a row limit does not cap query execution work or make SQL a security sandbox. Run trusted SQL with least-privilege credentials.
 
 Each task opens a short-lived engine, reapplies catalog attachments, and runs DuckDB `LIMIT batch_size + 1 OFFSET cursor`. One-row lookahead determines whether another page exists. Non-final pages save an integer offset under `batch_cursors.<alias>`; the final page returns a null cursor and marks `batch_final.<alias>` true. An exact-size final SQL page needs no extra empty read. SQL inputs do not acknowledge source rows; only the worker task is acknowledged after output/checkpoint publication succeeds.

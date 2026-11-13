@@ -18,8 +18,6 @@ workflow:
                   batch_size: 200000
           outputs:
             methods:
-              - method: stream
-                retention: 3m
               - method: s3_tables
                 connection: quickstart_lake
                 schema: quickstart_observation_upsert
@@ -28,10 +26,25 @@ workflow:
                 table: quickstart_observation_upsert
     - name: silver
       nodes:
+        - name: read_observations
+          inputs:
+            - ref: quickstart_observations_redis.bronze.raw_observations
+              alias: observations
+              methods:
+                - method: sql
+                  catalogs:
+                    - connection: quickstart_lake
+                      catalog: local_catalog
+                  sql_name: quickstart_observations
+                  batch_size: 200000
+          outputs:
+            methods:
+              - method: stream
+                retention: 3m
         - name: transform_observation_history
           task_stream: oxidizer:reagent:special-worker
           inputs:
-            - ref: quickstart_observations_redis.bronze.raw_observations
+            - ref: quickstart_observations_redis.silver.read_observations
               alias: observations
               methods:
                 - method: stream

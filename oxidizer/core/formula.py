@@ -1,4 +1,5 @@
 import json
+import re
 import yaml 
 from enum import Enum
 from collections import defaultdict, deque 
@@ -7,6 +8,18 @@ from typing import Dict, List
 from ..utils.phase import CheckpointMetadata
 from .residue import Residue
 from .lattice import S3Connection, RedisConnection
+
+
+def _validate_sql_name(sql_name: str) -> str:
+    if not isinstance(sql_name, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", sql_name):
+        raise ValueError("SQL name must contain only letters, digits, underscores, hyphens, and dots")
+    return sql_name
+
+
+def _validate_sql_text(sql: str) -> str:
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("Stored SQL must be a non-empty string")
+    return sql
 
 
 
@@ -206,6 +219,35 @@ class S3Formula(_RunIndex):
             key=key,
         )
         return schema
+
+    def list_formula_sql(self) -> list[str]:
+        """List SQL names under the S3 sql prefix."""
+        prefix = self.connection.object_key("sql/")
+        return sorted(
+            key.removeprefix(prefix).removesuffix(".sql")
+            for key in self._list_run_keys(prefix)
+            if key.endswith(".sql")
+        )
+
+    def create_formula_sql(self, sql_name: str, sql: str):
+        """Store a named SQL file in S3."""
+        name = _validate_sql_name(sql_name)
+        text = _validate_sql_text(sql)
+        key = self.connection.object_key(f"sql/{name}.sql")
+        self.connection.client.put_object(
+            Bucket=self.connection.bucket, Key=key,
+            Body=text.encode("utf-8"), ContentType="application/sql",
+        )
+        self.residue.emit(self.residue.ash.DEBUG, "FORMULA: Created SQL", backend=self.backend, sql_name=name, key=key)
+
+    def load_formula_sql(self, sql_name: str) -> str:
+        """Load a named SQL file from S3."""
+        name = _validate_sql_name(sql_name)
+        key = self.connection.object_key(f"sql/{name}.sql")
+        response = self.connection.client.get_object(Bucket=self.connection.bucket, Key=key)
+        sql = _validate_sql_text(response["Body"].read().decode("utf-8"))
+        self.residue.emit(self.residue.ash.DEBUG, "FORMULA: Loaded SQL", backend=self.backend, sql_name=name, key=key)
+        return sql
 
     def load_formula_connection(self, connection_name: str):
         """
@@ -677,6 +719,35 @@ class RedisFormula(_RunIndex):
         )
         return schema
 
+    def list_formula_sql(self) -> list[str]:
+        """List SQL names in RedisJSON."""
+        prefix = "oxidizer:sql:"
+        names = []
+        for key in self.connection.client.scan_iter(match=f"{prefix}*"):
+            if isinstance(key, bytes):
+                key = key.decode("utf-8")
+            names.append(key.removeprefix(prefix))
+        return sorted(names)
+
+    def create_formula_sql(self, sql_name: str, sql: str):
+        """Store named SQL text in RedisJSON."""
+        name = _validate_sql_name(sql_name)
+        text = _validate_sql_text(sql)
+        key = f"oxidizer:sql:{name}"
+        self.connection.client.json().set(key, "$", text)
+        self.residue.emit(self.residue.ash.DEBUG, "FORMULA: Created SQL", backend=self.backend, sql_name=name, redis_key=key)
+
+    def load_formula_sql(self, sql_name: str) -> str:
+        """Load named SQL text from RedisJSON."""
+        name = _validate_sql_name(sql_name)
+        key = f"oxidizer:sql:{name}"
+        sql = self.connection.client.json().get(key)
+        if sql is None:
+            raise ValueError(f"SQL not found: {name}")
+        sql = _validate_sql_text(sql)
+        self.residue.emit(self.residue.ash.DEBUG, "FORMULA: Loaded SQL", backend=self.backend, sql_name=name, redis_key=key)
+        return sql
+
     def load_formula_connection(self, connection_name: str):
         """
         Load one global connection mapping from RedisJSON.
@@ -1072,6 +1143,18 @@ class Formula:
         RedisJSON returns an empty mapping for a missing key.
         """
         return self.formula.load_formula_schema(schema_name)
+
+    def list_formula_sql(self) -> list[str]:
+        """List named SQL queries in the selected backend."""
+        return self.formula.list_formula_sql()
+
+    def create_formula_sql(self, sql_name: str, sql: str):
+        """Persist a named SQL query in the selected backend."""
+        return self.formula.create_formula_sql(sql_name, sql)
+
+    def load_formula_sql(self, sql_name: str) -> str:
+        """Load a named SQL query from the selected backend."""
+        return self.formula.load_formula_sql(sql_name)
 
     def load_formula_connection(self, connection_name: str):
         """Load a globally stored connection configuration.

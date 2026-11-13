@@ -155,6 +155,25 @@ class Oxidizer:
                     schema_documents[schema_name] = schema_document
                 method["schema_document"] = schema_documents[schema_name]
 
+    def __resolve_input_sql(self, formula_dag):
+        """Pin named SQL queries to the run's input methods."""
+        queries = {}
+        for node in formula_dag.get("nodes", {}).values():
+            for input_config in node.get("inputs", []):
+                for method in input_config.get("methods", []):
+                    if not isinstance(method, dict) or str(method.get("method", method.get("type", ""))).lower() != "sql":
+                        continue
+                    if "sql_name" not in method:
+                        continue
+                    if "query" in method:
+                        raise ValueError("SQL input must specify either query or sql_name, not both")
+                    name = method["sql_name"]
+                    if not isinstance(name, str) or not name:
+                        raise ValueError("SQL input sql_name must be a non-empty name")
+                    if name not in queries:
+                        queries[name] = self.formula.load_formula_sql(name)
+                    method["query"] = queries[name]
+
     def __prepare_formula_invocation(self, invocation_id, invocation_data):
         """Create initial durable state for one valid invocation.
 
@@ -205,6 +224,7 @@ class Oxidizer:
         formula_connections = self.__load_formula_connections(connection_names)
         formula_dag = self.formula.dag(formula_id, workflow_config)
         self.__resolve_output_schemas(formula_dag)
+        self.__resolve_input_sql(formula_dag)
         initial_state = {
             "status": "created",
             "started_at": None,
