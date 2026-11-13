@@ -440,6 +440,55 @@ An upstream record such as `{"parameters": [42, "open"]}` supplies the positiona
 
 Pages for one message carry the claimed message and next offset in the cursor. The message is acknowledged with its last page, and the next task claims the next message. The input is final when the trigger stream is empty, following the same rules as [stream-triggered API inputs](#stream-triggered-api-inputs).
 
+#### Named SQL With Triggered Parameters
+
+The same trigger works with a stored SQL file. For example, save this as
+`customer_orders.sql`:
+
+```sql
+SELECT order_id, customer_id, total
+FROM sales.analytics.orders
+WHERE customer_id = ? AND status = ?
+ORDER BY order_id
+```
+
+Upload it to the Formula backend using its name without the extension:
+
+```python
+from pathlib import Path
+
+formula.create_formula_sql(
+    "customer_orders",
+    Path("customer_orders.sql").read_text(encoding="utf-8"),
+)
+```
+
+Then replace the inline `query` with `sql_name` while keeping the trigger:
+
+```yaml
+inputs:
+  - ref: orders.source.list_customers
+    alias: customer_orders
+    methods:
+      - method: sql
+        catalogs:
+          - connection: sales_lake
+            catalog: sales
+        sql_name: customer_orders
+        input_trigger:
+          type: stream
+          attribute: parameters
+        batch_size: 1000
+```
+
+For each upstream record such as `{"parameters": [42, "open"]}`, DuckDB
+binds those values to the file's `?` placeholders in order and runs the
+query across as many pages as needed. The controller pins the file's text at
+invocation; subsequent messages use that same text, even if the stored file
+changes. Triggered parameters replace static ones, and the message is
+acknowledged only after its last page succeeds. As with inline SQL, paging
+does not provide a shared data snapshot.
+
 ## Stream-Triggered API Inputs
 
 An API input can take each request's endpoint, GET query parameters, or POST
