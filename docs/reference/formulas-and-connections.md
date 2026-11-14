@@ -385,6 +385,9 @@ assert "enriched_orders" in formula.list_formula_sql()
 sql = formula.load_formula_sql("enriched_orders")
 ```
 
+Topology also lists stored names through `GET /api/sql` or the `list_sql` MCP
+tool; neither returns query text.
+
 ```yaml
 inputs:
   - alias: enriched

@@ -71,6 +71,9 @@ class FakeFormula:
     def list_formula_schemas(self):
         return ["weather_history", "orders"]
 
+    def list_formula_sql(self):
+        return ["weather", "orders"]
+
     def load_formula_connection(self, name):
         return self.connections[name]
 
@@ -178,7 +181,7 @@ def test_topology_health_and_formula_tools_and_routes():
     tools = asyncio.run(topology.mcp._list_tools() if hasattr(topology.mcp, "_list_tools") else topology.mcp.list_tools())
     assert {tool.name for tool in tools} == {
         "list_formulas", "get_formula", "list_formula_states", "get_formula_state", "get_node_state", "upload_config", "list_formula_logs",
-        "upload_config", "list_connections", "list_schemas", "query", "list_formula_runs", "list_active_formula_runs", "get_transport_health", "search_docs", "read_doc", "get_docs_search_status",
+        "upload_config", "list_connections", "list_schemas", "list_sql", "query", "list_formula_runs", "list_active_formula_runs", "get_transport_health", "search_docs", "read_doc", "get_docs_search_status",
     }
     assert topology.list_formulas() == ["daily-users", "orders"]
     assert formula.list_calls == 4
@@ -435,6 +438,37 @@ def test_registered_schema_listing_and_failures(monkeypatch):
     response = client.get("/api/schemas")
     assert response.status_code == 503
     assert response.json() == {"error": "Unable to list registered schemas"}
+
+
+def test_stored_sql_listing_and_failures(monkeypatch):
+    from fastmcp.exceptions import ToolError
+
+    topology = Topology(FakeFormula(), FakeCatalyst())
+    topology.register_api_endpoints()
+    topology.register_mcp_tools()
+    client = TestClient(topology.app)
+
+    response = client.get("/api/sql")
+    assert response.status_code == 200
+    assert response.json() == {"sql": ["orders", "weather"]}
+    result = asyncio.run(topology.mcp.call_tool("list_sql", {}))
+    assert json.loads(result.content[0].text) == ["orders", "weather"]
+
+    monkeypatch.setattr(topology.formula, "list_formula_sql", lambda: [])
+    assert client.get("/api/sql").json() == {"sql": []}
+    result = asyncio.run(topology.mcp.call_tool("list_sql", {}))
+    assert result.content == []
+
+    def fail():
+        raise RuntimeError("private storage details")
+
+    monkeypatch.setattr(topology.formula, "list_formula_sql", fail)
+    response = client.get("/api/sql")
+    assert response.status_code == 503
+    assert response.json() == {"error": "Unable to list stored SQL"}
+    with pytest.raises(ToolError) as failure:
+        asyncio.run(topology.mcp.call_tool("list_sql", {}))
+    assert "private" not in str(failure.value)
 
 
 def test_topology_lists_only_s3_tables_connection_names():
