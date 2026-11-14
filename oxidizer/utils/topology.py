@@ -49,6 +49,13 @@ class Topology:
 		"""List names of stored schema documents used by table outputs."""
 		return sorted(self.formula.list_formula_schemas())
 
+	def list_sql(self) -> list[str]:
+		"""List stored SQL names without exposing query text."""
+		try:
+			return sorted(self.formula.list_formula_sql())
+		except Exception:
+			raise RuntimeError("Unable to list stored SQL") from None
+
 	def list_connections(self, connection_types: list[str] | None = None) -> list[str]:
 		"""List stored connection names matching types without exposing settings."""
 		types = set(connection_types if connection_types is not None else ["s3_tables"])
@@ -372,6 +379,13 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to list registered schemas"}, status_code=503)
 
+		@self.app.get("/api/sql", name="api_list_sql")
+		async def api_list_sql(request: Request):
+			try:
+				return JSONResponse({"sql": self.list_sql()})
+			except RuntimeError:
+				return JSONResponse({"error": "Unable to list stored SQL"}, status_code=503)
+
 		@self.app.get("/api/connections", name="api_list_connections")
 		async def api_list_connections(request: Request):
 			try:
@@ -509,6 +523,14 @@ class Topology:
 		def list_connections_tool() -> list[str]:
 			"""List S3 Tables connection names stored by Formula, without credentials."""
 			return self.list_connections()
+
+		@self.mcp.tool(
+			name="list_sql",
+			annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True},
+		)
+		def list_sql_tool() -> list[str]:
+			"""List stored SQL names, without query text."""
+			return self.list_sql()
 
 		@self.mcp.tool(name="list_schemas")
 		def list_schemas_tool(connection_name: str) -> dict:

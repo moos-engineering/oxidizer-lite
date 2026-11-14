@@ -108,6 +108,7 @@ Example response:
 | `GET /api/transport/health?stream_name=...&group_name=...` | Read-only primary-Catalyst metadata for one stream/topic; group is optional. |
 | `GET /api/connections` | `{"connections":["..."]}` containing connection names sorted by name. Optional repeated `type` filters match stored connection types (e.g. `?type=redis&type=kafka`); omitted filters select `s3_tables`. Empty filters return 400. Settings and credentials are never returned. |
 | `GET /api/schemas` | `{"schemas":["..."]}` containing registered schema document names sorted by name. |
+| `GET /api/sql` | `{"sql":["..."]}` containing stored SQL names sorted by name, without query text. |
 | `GET /api/connections/{connection_name}/schemas` | Iceberg namespaces/SQL schemas and table metadata from Crucible. |
 | `POST /api/connections/{connection_name}/query` | Bounded SQL query results from Crucible; body includes `sql` and optional `max_rows`. |
 | `GET /api/formulas/{formula_id}/runs` | Formula ID and normalized run records containing `formula_id`, `run_id`, `status`, `started_at`, and `completed_at`. |
@@ -132,6 +133,11 @@ therefore leave a run absent from this view until authorized maintenance
 reconciliation; see [active runs and archival](run-state-and-checkpoints.md#active-runs-and-archival).
 
 The connection route uses Formula's connection listing and loading methods to select documents whose `connection.type` is `s3_tables`, including AWS and RustFS table-catalog connections. It returns names only, never connection settings or credentials. No matching connections returns an empty list; backend failures return HTTP 503 with a generic error. This is table-catalog inspection, not general inspection of API or `type: s3` object-storage connections.
+
+The SQL listing returns names usable as `sql_name` in workflows, without SQL
+file contents or the S3 `.sql` extension. An empty store returns an empty list;
+backend failures return HTTP 503 with a generic error. See
+[Named SQL](formulas-and-connections.md#named-sql) for storage and usage.
 
 ## Connection Discovery And Queries
 
@@ -268,7 +274,7 @@ Example success response:
 - `400 Bad Request`: invalid query parameters, malformed JSON/YAML, unsupported document type, invalid name/version, or invalid invocation input.
 - `404 Not Found`: requested formula, run, node, Redis stream, or Redis consumer group does not exist.
 - `500 Internal Server Error`: unexpected storage or handler failure; responses do not expose exception details.
-- `503 Service Unavailable`: invocation enqueue, transport inspection, or the configured Catalyst's log range read fails.
+- `503 Service Unavailable`: invocation enqueue, storage listing, transport inspection, or the configured Catalyst's log range read fails.
 
 ## MCP Tools
 
@@ -382,6 +388,10 @@ these describe behavior, not an authorization boundary. Start with
 the source stream identified by the workflow configuration.
 
 `list_connections` takes no arguments and returns a sorted list of S3 Tables connection names from Formula, such as `["aws_lake", "local_lake"]`. It applies the same filtering as `GET /api/connections` and does not return credentials or other settings.
+
+`list_sql` takes no arguments and returns the same sorted SQL names as
+`GET /api/sql`, without query text. It declares read-only and idempotent hints.
+Storage failures produce an MCP tool error without backend details.
 
 `list_schemas(connection_name)` returns the same namespace/schema/table metadata as the connection schemas route. `query(connection_name, sql, max_rows=100)` returns the same bounded, JSON-compatible results as the query route, using Crucible's query guard. Both use stored S3 Tables connections and the `local_catalog` alias.
 

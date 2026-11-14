@@ -7,17 +7,26 @@ The two Parquet workflows perform the same work with different primary stream ba
 
 | Workflow | Transport | Nodes |
 | --- | --- | --- |
-| `quickstart_observations_redis` | Redis for control and data streams | `bronze.raw_observations` -> `silver.transform_observation_history` |
-| `quickstart_observations_kafka` | Kafka/Redpanda for control and data topics | `bronze.raw_observations` -> `silver.transform_observation_history` |
+| `quickstart_observations_redis` | Redis for control and data streams | `bronze.raw_observations` -> `silver.read_observations` -> `silver.transform_observation_history` |
+| `quickstart_observations_kafka` | Kafka/Redpanda for control and data topics | `bronze.raw_observations` -> `silver.read_observations` -> `silver.transform_observation_history` |
 | `quickstart_api_params` | Either selected backend | `source.weather_requests` -> `weather.hourly_forecasts` |
 
 The additional API workflow demonstrates dynamic GET query parameters against
 Open-Meteo's weather forecast endpoint. Both stacks seed it automatically.
 
-The bronze node reads ordered Parquet pages, normalizes timestamps, publishes
-records to a stream/topic, and upserts an Iceberg table. The silver node consumes
-those records and applies the schema's SCD2 policy to build history. The silver
-Python function is deliberately pass-through: Crucible performs the SCD2 write.
+The bronze node reads ordered Parquet pages, normalizes timestamps, and upserts
+an Iceberg table. Once it finishes, `silver.read_observations` reads that table
+using the named [SQL file](sql/quickstart_observations.sql) and publishes its
+rows to a stream/topic. The read node normalizes DuckDB timestamps for JSON
+stream transport. The history node consumes the stream and applies the schema's
+SCD2 policy; its Python function is deliberately pass-through.
+
+The SQL file is seeded as `quickstart/sql/quickstart_observations.sql` in the
+Formula bucket and referenced as `sql_name: quickstart_observations`. The
+controller pins its contents for each run. Its `ORDER BY entity_id, observed_at`
+uses the source table's unique key and keeps each entity's history in order.
+SQL pages reexecute the query without a shared snapshot, so do not modify the
+source table or run concurrent workflows that write it until the read finishes.
 
 In the Redis demo, the silver node sets `task_stream:
 oxidizer:reagent:special-worker` in [workflow.redis.yml](workflows/workflow.redis.yml),
@@ -27,7 +36,7 @@ shared worker stream. Use this pattern to pin nodes to specific machines, such
 as GPU instances.
 
 The Redis demo sets `controller.retention: 3m` in
-[runtime.redis.yml](runtime.redis.yml) and `retention: 3m` on the bronze stream
+[runtime.redis.yml](runtime.redis.yml) and `retention: 3m` on the SQL node's stream
 output in [workflow.redis.yml](workflows/workflow.redis.yml). These expire entire
 stream keys, including messages and consumer groups. Task writes and non-empty
 control reads refresh control TTLs; non-empty output writes refresh the data
@@ -60,8 +69,22 @@ the host's architecture automatically. Older AMD64-only releases require
 is published.
 Serving does not need a model download or API key.
 The seeder generates a reproducible 1,000,000-row Parquet fixture and uploads
-the data and YAML documents. Wait for `Ready to invoke
+the data, YAML documents, and SQL file. Wait for `Ready to invoke
 quickstart_observations_redis` in the seed log before invoking.
+
+The runtime image must include named SQL support in both the controller and
+worker. If it has not yet been published, build it from the repository root
+and start without pulling over the local image:
+
+```bash
+docker build --target runtime -f docker/oxidizer-lite.dockerfile \
+  -t ghcr.io/moos-engineering/oxidizer-lite:latest .
+cd examples/quickstart
+docker compose -f compose.redis.yml pull api
+docker compose -f compose.redis.yml up -d --pull never
+```
+
+Use `compose.kafka.yml` for the Kafka stack.
 
 Storage is disposable. Removing containers discards their data; Redis also loses
 its data when stopped. The generated Parquet file stays in this directory.
@@ -102,7 +125,7 @@ curl --fail-with-body --silent --show-error \
   "http://localhost:8027/api/formulas/quickstart_observations_redis/runs/<run-id>"
 ```
 
-Substitute the returned `run_id` and the selected workflow ID. Wait for both
+Substitute the returned `run_id` and the selected workflow ID. Wait for all three
 nodes to reach `success`, then read the table results:
 
 ```bash
@@ -119,7 +142,7 @@ curl --fail-with-body --silent --show-error \
 
 Expect 1,000,000 upsert rows across 10 entities, 1,000,000 history versions, and
 10 current rows. Replaying the same fixture should leave these table counts
-unchanged, but appends another copy to the raw stream/topic. This is not an
+unchanged, but appends another copy to the SQL node's stream/topic. This is not an
 exactly-once guarantee. Verify counts, particularly for Kafka, whose short-poll
 finality and recovery behavior remain limited.
 
@@ -209,6 +232,7 @@ or recreating workers during an active run. See [local image builds](../../docke
 | --- | --- |
 | [runtime.redis.yml](runtime.redis.yml), [runtime.kafka.yml](runtime.kafka.yml) | Formula store, primary transport, log level, worker router, dedicated worker task stream, selected workflow |
 | [workflow.redis.yml](workflows/workflow.redis.yml), [workflow.kafka.yml](workflows/workflow.kafka.yml) | Bronze/silver nodes, dependencies, input paths, batch sizes, outputs |
+| [quickstart_observations.sql](sql/quickstart_observations.sql) | Named SQL query that reads the upsert table in history order |
 | [workflow.api-params.yml](workflows/workflow.api-params.yml), [open-meteo.yml](connections/open-meteo.yml) | Dynamic GET query-parameter trigger and the weather API connection |
 | [local-files.yml](connections/local-files.yml), [local-lake.yml](connections/local-lake.yml) | Named S3 input and Iceberg output connections |
 | [upsert-observations.yml](schemas/upsert-observations.yml) | Typed fields, entity/time keys, winning source revision |

@@ -381,6 +381,97 @@ def test_oxidizer_rejects_table_output_without_named_schema():
     assert formula.load_formula_state("quotes", run_id="run-1") == {}
 
 
+def test_named_sql_is_pinned_and_used_for_dispatched_pages(monkeypatch):
+    from oxidizer.reagent import DataHandler
+    from oxidizer.utils.crucible import Crucible
+
+    formula = Formula(RedisConnection(client=FakeRedisClient()))
+    sql = "SELECT id FROM lake.main.orders WHERE id >= ? ORDER BY id"
+    formula.create_formula_sql("orders", sql)
+    formula.create_formula_connection("lake", {"connection": {"type": "s3_tables"}})
+    formula.create_formula_config("orders", {"layers": [{
+        "name": "source",
+        "nodes": [{"name": "read", "type": "scheduled", "inputs": [
+            {"alias": "rows", "methods": [{
+                "method": "sql", "sql_name": "orders",
+                "catalogs": [{"connection": "lake", "catalog": "lake"}],
+                "parameters": [100], "batch_size": 1,
+            }]},
+            {"alias": "inline", "methods": [{
+                "method": "sql", "query": "SELECT 1",
+                "catalogs": [{"connection": "lake", "catalog": "lake"}],
+            }]},
+        ]}],
+    }]})
+    catalyst = FakeCatalyst(messages=[("1-0", {"message": {"formula_id": "orders", "run_id": "run-1"}})])
+    oxidizer = Oxidizer(formula, catalyst)
+    oxidizer.oxidize_invocations()
+    formula.create_formula_sql("orders", "SELECT 999")
+    oxidizer.oxidize_formulas()
+
+    task = catalyst.writes[-1][1]
+    method = task["node"]["inputs"][0]["methods"][0]
+    assert method["sql_name"] == "orders"
+    assert method["query"] == sql
+    assert task["node"]["inputs"][1]["methods"][0]["query"] == "SELECT 1"
+    assert formula.load_formula_state("orders", "run-1")["dag"]["nodes"]["orders.source.read"]["inputs"][0]["methods"][0]["query"] == sql
+
+    calls = []
+
+    def read(connections, query, **options):
+        calls.append((connections, query, options["parameters"], options["offset"]))
+        return {"rows": [{"id": options["offset"]}], "is_final": options["offset"] == 1, "next_cursor": 1}
+
+    monkeypatch.setattr(Crucible, "read_sql_batch", read)
+    handler = DataHandler()
+    connections = handler._task_connection(method, task["connections"])
+    handler.incoming_data(method, connections)
+    handler.incoming_data(method, connections, context={"cursor": 1})
+    assert [(query, parameters, offset) for _, query, parameters, offset in calls] == [
+        (sql, [100], 0), (sql, [100], 1),
+    ]
+
+
+def test_named_sql_uses_the_existing_read_only_query_guard():
+    from oxidizer.reagent import DataHandler
+
+    formula = Formula(RedisConnection(client=FakeRedisClient()))
+    formula.create_formula_sql("unsafe", "DELETE FROM lake.main.orders")
+    formula.create_formula_config("orders", {"layers": [{
+        "name": "source", "nodes": [{"name": "read", "inputs": [{"methods": [{
+            "method": "sql", "sql_name": "unsafe",
+            "catalogs": [{"connection": "lake", "catalog": "lake"}],
+        }]}]}],
+    }]})
+    formula.create_formula_connection("lake", {"connection": {"type": "s3_tables"}})
+    catalyst = FakeCatalyst(messages=[("1-0", {"message": {"formula_id": "orders", "run_id": "run-1"}})])
+    prepared = Oxidizer(formula, catalyst).oxidize_invocations()
+    method = prepared[0]["formula_dag"]["nodes"]["orders.source.read"]["inputs"][0]["methods"][0]
+    with pytest.raises(ValueError, match="single SELECT or WITH"):
+        DataHandler().incoming_data(method, {"lake": {}})
+
+
+@pytest.mark.parametrize("options, message", [
+    ({"sql_name": "missing"}, "SQL not found"),
+    ({"sql_name": ""}, "non-empty name"),
+    ({"sql_name": "../bad"}, "SQL name"),
+    ({"sql_name": "orders", "query": "SELECT 1"}, "either query or sql_name"),
+])
+def test_invalid_named_sql_fails_before_invocation_acknowledgement(options, message):
+    formula = Formula(RedisConnection(client=FakeRedisClient()))
+    formula.create_formula_config("orders", {"layers": [{
+        "name": "source",
+        "nodes": [{"name": "read", "inputs": [{"methods": [{"method": "sql", **options}]}]}],
+    }]})
+    catalyst = FakeCatalyst(messages=[("1-0", {"message": {"formula_id": "orders", "run_id": "run-1"}})])
+    oxidizer = Oxidizer(formula, catalyst)
+
+    with pytest.raises(ValueError, match=message):
+        oxidizer.oxidize_invocations()
+    assert catalyst.acks == []
+    assert formula.load_formula_state("orders", "run-1") == {}
+
+
 def test_oxidizer_extracts_connection_names_from_nested_workflow_config():
     formula = Formula(RedisConnection(client=FakeRedisClient()))
     catalyst = FakeCatalyst()

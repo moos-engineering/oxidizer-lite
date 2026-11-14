@@ -85,6 +85,7 @@ def hourly_forecasts(data, context):
 
 NODE_ROUTES = {
     "raw_observations": raw_observations,
+    "read_observations": raw_observations,
     "transform_observation_history": transform_observation_history,
     "weather_requests": weather_requests,
     "hourly_forecasts": hourly_forecasts,

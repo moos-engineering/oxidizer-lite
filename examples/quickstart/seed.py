@@ -94,6 +94,14 @@ def main(config_path=ROOT / "runtime.redis.yml"):
             ContentType="application/x-yaml",
         )
         print(f"Seeded {key}", flush=True)
+    sql_path = ROOT / "sql/quickstart_observations.sql"
+    sql_key = "/".join(filter(None, (prefix, "sql", sql_path.name)))
+    client.put_object(
+        Bucket=settings["bucket"], Key=sql_key,
+        Body=sql_path.read_text(encoding="utf-8").encode("utf-8"),
+        ContentType="application/sql",
+    )
+    print(f"Seeded {sql_key}", flush=True)
     client.upload_file(str(fixture), seed["data_bucket"], seed["data_key"])
     print(f"Ready to invoke {workflow['name']}", flush=True)
     print("Ready to invoke quickstart_api_params", flush=True)
