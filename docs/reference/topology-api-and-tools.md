@@ -117,7 +117,7 @@ Example response:
 | `GET /api/formulas/{formula_id}/runs/{run_id}/nodes/{node_id}` | Node ID, stored node/checkpoint data, parents, and children without response-time masking. |
 | `GET /api/formulas/{formula_id}/logs?run_id=...&limit=100` | Recent matching log events, newest first. `run_id` is optional; `limit` is 1-1,000. |
 | `POST /api/invocations` | Enqueue an existing formula; generates a UUID run ID and returns `202 Accepted`. |
-| `POST /api/configs` | Stores or replaces one version 1 workflow, connection, or schema document. |
+| `POST /api/configs` | Stores or replaces a version 1 workflow, connection, or schema document, or an uploaded SQL file. |
 
 The runs route lists all run IDs returned by Formula for that formula, not only nonterminal runs. State IDs are normalized in the REST response even though Formula backends use different separators. `started_at` is set on the first worker lifecycle update persisted by the controller; `completed_at` remains null until aggregate status becomes `success` or `failed`. Both timestamps are UTC RFC 3339 strings ending in `Z`. Missing formulas, runs, or nodes return HTTP 404.
 
@@ -255,6 +255,8 @@ Example log response:
 }
 ```
 
+## Upload Configuration And SQL
+
 The upload endpoint accepts a JSON object with YAML text in its `content` field:
 
 ```json
@@ -262,6 +264,26 @@ The upload endpoint accepts a JSON object with YAML text in its `content` field:
 ```
 
 Supported document types are `workflow`, `connection`, and `schema`. Each requires `templateVersion: 1` and a safe `name`; the name and type select the Formula storage operation. The content limit is 1 MB. Uploading an existing name replaces its current document. Success returns the type and name only, not config contents. Invalid YAML/envelopes return HTTP 400; storage failures return a generic HTTP 500.
+
+To upload a SQL file, send its UTF-8 content and filename as JSON. For example:
+
+```bash
+python3 -c 'import json, sys; print(json.dumps({"filename": "customer_orders.sql", "content": sys.stdin.read()}))' \
+  < customer_orders.sql | curl --fail-with-body http://127.0.0.1:8000/api/configs \
+  -H 'Content-Type: application/json' --data-binary @-
+```
+
+The response is `{"type":"sql","name":"customer_orders","stored":true}`.
+The name is derived from the filename without `.sql`; no separate name or
+type is needed. The endpoint accepts one SQL document per request.
+Formula writes UTF-8 text to `sql/customer_orders.sql` under the S3 prefix or
+stores a RedisJSON string at `oxidizer:sql:customer_orders`. Uploading the same
+name replaces it; existing runs retain their pinned query. SQL names may start
+with a letter, digit, or underscore and otherwise contain letters, digits,
+underscores, hyphens, and dots. Empty SQL, invalid names, and content exceeding
+1,000,000 UTF-8 bytes return HTTP 400. Non-UTF-8 files and filenames without
+the `.sql` extension are rejected. SQL validation happens at execution,
+not upload; store trusted queries and do not embed credentials.
 
 Example success response:
 
@@ -409,7 +431,7 @@ Storage failures produce an MCP tool error without backend details.
 
 `get_node_state` accepts `formula_id`, `run_id`, and `node_id`. It returns that node's status and stored state, checkpoint metadata if present, parent node IDs, and child node IDs without additional masking.
 
-`upload_config` accepts YAML text in `content` and applies the same validation and Formula dispatch as `POST /api/configs`. It returns storage metadata only.
+`upload_config` accepts YAML text in `content` and applies the same YAML validation and Formula dispatch as `POST /api/configs`. It returns storage metadata only. SQL file uploads use the REST endpoint with `filename` and `content`.
 
 The server is constructed with `Topology(formula, catalyst)`. Formula enumeration, config/state loading, and storage remain owned by Formula; Catalyst owns log stream access. Log sanitation belongs to Residue/RedisStreamLogSink before emission, not to Topology. See [the logging contract](logging-and-sinks.md#secret-handling-contract); use trusted access control for stored state and logs.
 

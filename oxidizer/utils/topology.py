@@ -9,7 +9,7 @@ import uuid
 
 import yaml
 
-from oxidizer.core.formula import Formula, TERMINAL_RUN_STATUSES
+from oxidizer.core.formula import Formula, TERMINAL_RUN_STATUSES, _validate_sql_name
 from oxidizer.core.catalyst import Catalyst
 from oxidizer.core.residue import log_stream_name
 from oxidizer.core.lattice import IcebergRestConnection, S3Connection, S3TablesConnection
@@ -337,7 +337,19 @@ class Topology:
 			try:
 				payload = await request.json()
 				if not isinstance(payload, Mapping) or not isinstance(payload.get("content"), str):
-					return JSONResponse({"error": "JSON body must include YAML string field 'content'"}, status_code=400)
+					return JSONResponse({"error": "JSON body must include string field 'content'"}, status_code=400)
+				if "filename" in payload:
+					filename = payload["filename"]
+					if not isinstance(filename, str) or not filename.endswith(".sql"):
+						raise ValueError("SQL file must have a .sql extension")
+					name = _validate_sql_name(filename[:-4])
+					sql = payload["content"]
+					if len(sql.encode("utf-8")) > self.MAX_CONFIG_SIZE:
+						raise ValueError(f"SQL exceeds the {self.MAX_CONFIG_SIZE}-byte limit")
+					if not sql.strip():
+						raise ValueError("SQL file must not be empty")
+					self.formula.create_formula_sql(name, sql)
+					return JSONResponse({"type": "sql", "name": name, "stored": True}, status_code=201)
 				result = self.upload_config(payload["content"])
 				return JSONResponse(result, status_code=201)
 			except ValueError as exc:

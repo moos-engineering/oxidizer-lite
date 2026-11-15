@@ -358,6 +358,24 @@ def test_named_sql_round_trips_and_lists_in_both_backends(indexed_formula):
         assert formula.connection.client.values["oxidizer:sql:orders"] == sql
 
 
+def test_topology_upload_sql_uses_selected_formula_backend(indexed_formula):
+    from oxidizer.utils.topology import Topology
+    from starlette.testclient import TestClient
+
+    topology = Topology(indexed_formula, catalyst=None)
+    topology.register_api_endpoints()
+    client = TestClient(topology.app)
+    response = client.post("/api/configs", json={"filename": "orders.sql", "content": "SELECT 1\n"})
+    assert response.status_code == 201
+    assert response.json() == {"type": "sql", "name": "orders", "stored": True}
+    assert indexed_formula.load_formula_sql("orders") == "SELECT 1\n"
+    assert client.get("/api/sql").json() == {"sql": ["orders"]}
+    if indexed_formula.formula.backend == "s3":
+        assert indexed_formula.connection.client.objects[("demo", "formulae/sql/orders.sql")] == b"SELECT 1\n"
+    else:
+        assert indexed_formula.connection.client.values["oxidizer:sql:orders"] == "SELECT 1\n"
+
+
 def test_named_sql_is_pinned_during_invocation_on_both_backends(indexed_formula):
     from oxidizer import Oxidizer
 

@@ -65,6 +65,9 @@ class FakeFormula:
     def create_formula_schema(self, name, config):
         self.uploads[("schema", name)] = config
 
+    def create_formula_sql(self, name, sql):
+        self.uploads[("sql", name)] = sql
+
     def list_formula_connections(self):
         return list(self.connections)
 
@@ -738,3 +741,79 @@ def test_topology_config_upload_endpoint_stores_and_validates_yaml():
     invalid = client.post("/api/configs", json={"content": "type: invalid"})
     assert invalid.status_code == 400
     assert formula.uploads == {("connection", "users_api"): config}
+
+
+def test_topology_uploads_named_sql_file(tmp_path):
+    formula = FakeFormula()
+    topology = Topology(formula, FakeCatalyst())
+    topology.register_api_endpoints()
+    client = TestClient(topology.app)
+    sql = "SELECT id FROM lake.main.orders WHERE id >= ? ORDER BY id\n"
+    file_path = tmp_path / "orders.sql"
+    file_path.write_text(sql, encoding="utf-8")
+
+    response = client.post("/api/configs", json={"filename": file_path.name, "content": file_path.read_text(encoding="utf-8")})
+    assert response.status_code == 201
+    assert response.json() == {"type": "sql", "name": "orders", "stored": True}
+    assert formula.uploads[("sql", "orders")] == sql
+
+    response = client.post("/api/configs", json={"filename": "orders.sql", "content": "SELECT 2"})
+    assert response.status_code == 201
+    assert formula.uploads[("sql", "orders")] == "SELECT 2"
+
+
+def test_topology_sql_upload_accepts_exact_byte_limit():
+    formula = FakeFormula()
+    topology = Topology(formula, FakeCatalyst())
+    topology.register_api_endpoints()
+    content = "SELECT 1" + " " * (topology.MAX_CONFIG_SIZE - len("SELECT 1"))
+    response = TestClient(topology.app).post("/api/configs", json={"filename": "orders.sql", "content": content})
+    assert response.status_code == 201
+    assert formula.uploads[("sql", "orders")] == content
+
+
+@pytest.mark.parametrize("payload", [
+    {"filename": "../orders.sql", "content": "SELECT 1"},
+    {"filename": "orders.txt", "content": "SELECT 1"},
+    {"filename": ".sql", "content": "SELECT 1"},
+    {"filename": None, "content": "SELECT 1"},
+    {"filename": 1, "content": "SELECT 1"},
+    {"filename": "orders.sql", "content": "  "},
+    {"filename": "orders.sql", "content": "é" * 500_001},
+    {"filename": "orders.sql", "content": None},
+    {"filename": "orders.sql"},
+])
+def test_topology_sql_upload_rejects_invalid_requests(payload):
+    formula = FakeFormula()
+    topology = Topology(formula, FakeCatalyst())
+    topology.register_api_endpoints()
+    response = TestClient(topology.app).post("/api/configs", json=payload)
+    assert response.status_code == 400
+    assert formula.uploads == {}
+
+
+@pytest.mark.parametrize("body", [
+    b'{"filename":"orders.sql","content":"\\ud800"}',
+    b'{"filename":"orders.sql","content":"\xff"}',
+])
+def test_topology_sql_upload_rejects_invalid_utf8(body):
+    formula = FakeFormula()
+    topology = Topology(formula, FakeCatalyst())
+    topology.register_api_endpoints()
+    response = TestClient(topology.app).post("/api/configs", content=body, headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert formula.uploads == {}
+
+
+def test_topology_sql_upload_surfaces_storage_failure_without_details(monkeypatch):
+    formula = FakeFormula()
+    topology = Topology(formula, FakeCatalyst())
+    topology.register_api_endpoints()
+
+    def fail(name, sql):
+        raise RuntimeError("private storage details")
+
+    monkeypatch.setattr(formula, "create_formula_sql", fail)
+    response = TestClient(topology.app).post("/api/configs", json={"filename": "orders.sql", "content": "SELECT 1"})
+    assert response.status_code == 500
+    assert response.json() == {"error": "Unable to store configuration"}
