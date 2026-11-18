@@ -1,0 +1,12 @@
+templateVersion: 1
+name: auth_hello
+type: workflow
+workflow:
+  layers:
+    - name: demo
+      nodes:
+        - name: hello
+          type: scheduled
+          outputs:
+            methods:
+              - method: stream

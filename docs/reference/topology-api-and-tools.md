@@ -24,9 +24,45 @@ The example defaults to HTTP on `127.0.0.1:8000`. Configure it with:
 | `OXIDIZER_TOPOLOGY_HOST` | `127.0.0.1` | HTTP bind host. |
 | `OXIDIZER_TOPOLOGY_PORT` | `8000` | HTTP bind port. |
 
-The example binds to loopback by default. The API has no authentication; `POST /api/configs` can replace stored configuration and `POST /api/invocations` can start workflows, so do not expose the server to an untrusted network without access control.
+The skeleton example binds to loopback and runs without authentication.
+`POST /api/configs` can replace stored configuration and `POST /api/invocations`
+can start workflows, so do not expose an unauthenticated server to an untrusted
+network.
 
-All routes return JSON. Send `Content-Type: application/json` with POST requests.
+REST API routes return JSON. Send `Content-Type: application/json` with REST POST requests.
+
+## Optional GitHub OAuth
+
+For the API image, add an optional block to its runtime YAML:
+
+```yaml
+topology:
+  oauth:
+    provider: github
+    client_id: "YOUR_GITHUB_OAUTH_CLIENT_ID"
+    client_secret: ""
+    base_url: https://topology.example.com
+    allowed_github_user_ids: [12345678]
+```
+
+Supply a nonempty `client_secret` through your secure runtime configuration
+loader. The API uses the loaded value directly; it does not look up an
+environment variable or resolve a secret reference. Do not commit the real
+value. Register `https://topology.example.com/mcp/auth/callback` as the GitHub
+OAuth app callback.
+Use the public origin without `/mcp`; HTTPS is required except on loopback.
+`github` is currently the only supported provider. Omit `topology.oauth` to
+preserve unauthenticated operation; an incomplete block fails startup.
+
+FastMCP handles discovery and browser sign-in at the existing `/mcp` endpoint.
+An OAuth-capable MCP client can discover and initiate GitHub sign-in from that
+URL. Protected REST requests accept the same provider-issued token as
+`Authorization: Bearer <token>`. Access requires a verified GitHub user ID on
+the allowlist. `/api/health` remains public.
+
+The API entry point constructs the provider and passes it as `auth` to
+`Topology`; library callers may also supply a configured FastMCP auth provider
+without using runtime YAML.
 
 ## Health Route
 

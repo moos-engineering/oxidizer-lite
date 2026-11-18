@@ -80,9 +80,10 @@ Connect an MCP client using **Streamable HTTP** at
 See the [API and MCP reference](docs/reference/topology-api-and-tools.md) for
 routes, tools, and documentation lookup.
 
-The API/MCP server has no built-in authentication. Keep it on loopback or behind
-trusted access control. Quickstart credentials and storage are disposable demo
-settings, not production configuration.
+The default quickstart runs without authentication. Keep it on loopback or
+behind trusted access control. To try GitHub OAuth for REST and MCP, use the
+[auth quickstart](examples/auth/README.md). Quickstart credentials and storage
+are disposable demo settings, not production configuration.
 
 ## Documentation
 

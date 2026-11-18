@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Annotated, TYPE_CHECKING
 import base64
 import json
 import re
@@ -16,6 +17,9 @@ from oxidizer.core.lattice import IcebergRestConnection, S3Connection, S3TablesC
 from oxidizer.utils.crucible import Crucible
 from oxidizer.utils.chisel import Chisel
 
+if TYPE_CHECKING:
+	from fastmcp.server.auth import AuthProvider
+
 try:
 	from fastapi import FastAPI
 	from fastmcp import FastMCP
@@ -27,18 +31,22 @@ except ImportError:  # pragma: no cover - exercised only without the optional ex
 class Topology:
 	MAX_CONFIG_SIZE = 1_000_000
 	MAX_LOG_SCAN = 10_000
+	MCP_MOUNT = "/mcp"
 
-	def __init__(self, formula: Formula, catalyst: Catalyst):
+	def __init__(self, formula: Formula, catalyst: Catalyst, *, auth: "AuthProvider | None" = None):
 		if FastMCP is None or FastAPI is None:
 			raise ImportError("Install oxidizer-lite[mcp] to use Topology/FastAPI/FastMCP support.")
 		self.formula = formula
 		self.catalyst = catalyst
 		self.documentation = Chisel()
 		self.documentation.get_search_status()
-		self.mcp = FastMCP("Oxidizer Topology")
+		self.auth = auth
+		self.mcp = FastMCP("Oxidizer Topology", auth=auth)
 		self.mcp_app = self.mcp.http_app(path="/", transport="http")
 		self.app = FastAPI(lifespan=self.mcp_app.lifespan)
-		self.app.mount("/mcp", self.mcp_app)
+		if auth is not None:
+			self.app.routes.extend(auth.get_well_known_routes(mcp_path="/"))
+		self.app.mount(self.MCP_MOUNT, self.mcp_app)
 		self._api_endpoints_registered = False
 		self._mcp_tools_registered = False
 
@@ -290,6 +298,8 @@ class Topology:
 	def register_api_endpoints(self):
 		if self._api_endpoints_registered:
 			return self.app
+		from fastapi import APIRouter, Depends, HTTPException, Security
+		from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 		from starlette.requests import Request
 		from starlette.responses import JSONResponse
 
@@ -297,12 +307,27 @@ class Topology:
 		async def api_health(request: Request):
 			return JSONResponse({"status": "ok", "service": "oxidizer-topology"})
 
-		@self.app.get("/api/docs/status", name="api_docs_status")
+		auth = self.auth
+		dependencies = []
+		if auth is not None:
+			bearer = HTTPBearer(auto_error=False)
+
+			async def require_access(credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer)]):
+				if credentials is not None:
+					token = await auth.verify_token(credentials.credentials)
+					if token is not None and set(auth.required_scopes).issubset(token.scopes):
+						return
+				raise HTTPException(401, "Valid bearer token required", headers={"WWW-Authenticate": "Bearer"})
+
+			dependencies.append(Depends(require_access))
+		router = APIRouter(dependencies=dependencies)
+
+		@router.get("/api/docs/status", name="api_docs_status")
 		async def api_docs_status(request: Request):
 			status = self.get_docs_search_status()
 			return JSONResponse(status, status_code=200 if status["ready"] else 503)
 
-		@self.app.get("/api/transport/health", name="api_transport_health")
+		@router.get("/api/transport/health", name="api_transport_health")
 		async def api_transport_health(request: Request):
 			try:
 				return JSONResponse(self.get_transport_health(
@@ -315,7 +340,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to inspect transport"}, status_code=503)
 
-		@self.app.post("/api/invocations", name="api_invoke_formula")
+		@router.post("/api/invocations", name="api_invoke_formula")
 		async def api_invoke_formula(request: Request):
 			try:
 				payload = await request.json()
@@ -332,7 +357,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to enqueue formula invocation"}, status_code=503)
 
-		@self.app.post("/api/configs", name="api_upload_config")
+		@router.post("/api/configs", name="api_upload_config")
 		async def api_upload_config(request: Request):
 			try:
 				payload = await request.json()
@@ -357,7 +382,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to store configuration"}, status_code=500)
 
-		@self.app.get(
+		@router.get(
 			"/api/formulas/{formula_id}/logs",
 			name="api_list_formula_logs",
 		)
@@ -380,25 +405,25 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to read formula logs"}, status_code=500)
 
-		@self.app.get("/api/formulas", name="api_list_formulas")
+		@router.get("/api/formulas", name="api_list_formulas")
 		async def api_list_formulas(request: Request):
 			return JSONResponse({"formulas": self.list_formulas()})
 
-		@self.app.get("/api/schemas", name="api_list_registered_schemas")
+		@router.get("/api/schemas", name="api_list_registered_schemas")
 		async def api_list_registered_schemas(request: Request):
 			try:
 				return JSONResponse({"schemas": self.list_registered_schemas()})
 			except Exception:
 				return JSONResponse({"error": "Unable to list registered schemas"}, status_code=503)
 
-		@self.app.get("/api/sql", name="api_list_sql")
+		@router.get("/api/sql", name="api_list_sql")
 		async def api_list_sql(request: Request):
 			try:
 				return JSONResponse({"sql": self.list_sql()})
 			except RuntimeError:
 				return JSONResponse({"error": "Unable to list stored SQL"}, status_code=503)
 
-		@self.app.get("/api/connections", name="api_list_connections")
+		@router.get("/api/connections", name="api_list_connections")
 		async def api_list_connections(request: Request):
 			try:
 				types = request.query_params.getlist("type") or None
@@ -408,7 +433,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to list connections"}, status_code=503)
 
-		@self.app.get("/api/connections/{connection_name}/schemas", name="api_list_schemas")
+		@router.get("/api/connections/{connection_name}/schemas", name="api_list_schemas")
 		async def api_list_schemas(request: Request):
 			try:
 				return JSONResponse(self.list_schemas(request.path_params["connection_name"]))
@@ -419,7 +444,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to discover connection schemas"}, status_code=503)
 
-		@self.app.post("/api/connections/{connection_name}/query", name="api_query")
+		@router.post("/api/connections/{connection_name}/query", name="api_query")
 		async def api_query(request: Request):
 			try:
 				payload = await request.json()
@@ -437,7 +462,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to execute query"}, status_code=503)
 
-		@self.app.get(
+		@router.get(
 			"/api/formulas/{formula_id}/runs",
 			name="api_list_formula_runs",
 		)
@@ -447,7 +472,7 @@ class Topology:
 				return JSONResponse({"error": "Formula not found", "formula_id": formula_id}, status_code=404)
 			return JSONResponse({"formula_id": formula_id, "runs": self.list_formula_runs(formula_id)})
 
-		@self.app.get(
+		@router.get(
 			"/api/formulas/{formula_id}/runs/active",
 			name="api_list_active_formula_runs",
 		)
@@ -460,7 +485,7 @@ class Topology:
 			except Exception:
 				return JSONResponse({"error": "Unable to list active runs"}, status_code=503)
 
-		@self.app.get(
+		@router.get(
 			"/api/formulas/{formula_id}/runs/{run_id}",
 			name="api_get_formula_state",
 		)
@@ -472,7 +497,7 @@ class Topology:
 				return JSONResponse({"error": "Run not found", "formula_id": formula_id, "run_id": run_id}, status_code=404)
 			return JSONResponse({"formula_id": formula_id, "run_id": run_id, "state": state})
 
-		@self.app.get(
+		@router.get(
 			"/api/formulas/{formula_id}/runs/{run_id}/nodes/{node_id}",
 			name="api_get_node_state",
 		)
@@ -487,6 +512,7 @@ class Topology:
 				return JSONResponse({"error": "Node not found", "node_id": node_id}, status_code=404)
 			return JSONResponse(node)
 
+		self.app.include_router(router)
 		self._api_endpoints_registered = True
 		return self.app
 

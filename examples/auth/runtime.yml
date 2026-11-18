@@ -1,0 +1,25 @@
+formula:
+  provider: s3
+  bucket: auth-configs
+  prefix: auth
+  endpoint_url: http://rustfs:9000
+  access_key_id: rustfsadmin
+  secret_access_key: rustfsadmin
+  region_name: us-east-1
+  addressing_style: path
+
+catalyst:
+  provider: redis
+  url: redis://redis:6379/0
+
+topology:
+  oauth:
+    provider: github
+    client_id: "YOUR_GITHUB_OAUTH_CLIENT_ID"
+    client_secret: ""
+    base_url: http://localhost:8028
+    allowed_github_user_ids: [12345678]
+
+worker:
+  custom_functions_file: /example/demo.py
+  custom_functions_router: hello

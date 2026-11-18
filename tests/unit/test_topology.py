@@ -249,6 +249,93 @@ def test_fastapi_mount_serves_mcp_protocol_with_lifespan():
     assert response.status_code == 200, response.text
 
 
+@pytest.fixture
+def oauth_api_runtime(monkeypatch, tmp_path):
+    import runpy
+    import sys
+
+    import oxidizer
+    from docker.utils import helpers
+    from fastmcp import settings
+
+    config = {
+        "provider": "github",
+        "client_id": "test-client",
+        "client_secret": "test-secret",
+        "base_url": "https://testserver",
+        "allowed_github_user_ids": [123],
+    }
+    monkeypatch.setattr(settings, "home", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["api"])
+    monkeypatch.setattr(helpers, "load_config", lambda _: {"topology": {"oauth": config}})
+    monkeypatch.setattr(helpers, "create_formula_connection", lambda *args: None)
+    monkeypatch.setattr(helpers, "create_catalyst_connection", lambda *args: None)
+    monkeypatch.setattr(oxidizer, "Formula", lambda *args, **kwargs: FakeFormula())
+    monkeypatch.setattr(oxidizer, "Catalyst", lambda *args, **kwargs: FakeCatalyst())
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    return config, lambda: runpy.run_module("docker.api", run_name="__main__")
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("provider", "unsupported"),
+    ("client_secret", None),
+    ("client_secret", " "),
+    ("base_url", "https://testserver/mcp"),
+    ("allowed_github_user_ids", []),
+])
+def test_api_runtime_rejects_invalid_oauth(oauth_api_runtime, field, value):
+    config, run = oauth_api_runtime
+    config[field] = value
+    with pytest.raises(ValueError, match=rf"topology\.oauth\.{field}"):
+        run()
+
+
+def test_api_runtime_shares_github_auth_between_rest_and_mcp(oauth_api_runtime, monkeypatch):
+    from urllib.parse import urlsplit
+
+    from fastmcp.server.auth import AccessToken
+    from fastmcp.server.auth.providers.github import GitHubProvider
+
+    _, run = oauth_api_runtime
+    topology = run()["topology"]
+
+    async def verify_upstream(self, token):
+        subject = {"allowed": "123", "denied": "456"}.get(token)
+        if subject is not None:
+            return AccessToken(token=token, client_id="123", scopes=[], subject=subject)
+        return None
+
+    monkeypatch.setattr(GitHubProvider, "load_access_token", verify_upstream)
+    initialize = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "topology-test", "version": "1.0.0"},
+        },
+    }
+    with TestClient(topology.app, base_url="https://testserver") as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.post("/api/configs", json={"content": "not YAML"}).status_code == 401
+        headers = {"Accept": "application/json, text/event-stream"}
+        response = client.post("/mcp/", headers=headers, json=initialize)
+        assert response.status_code == 401
+        metadata_url = response.headers["WWW-Authenticate"].split('resource_metadata="')[1].split('"')[0]
+        assert urlsplit(metadata_url).netloc == "testserver"
+        resource = client.get(metadata_url).json()
+        assert resource["resource"].rstrip("/") == "https://testserver/mcp"
+        issuer = resource["authorization_servers"][0].rstrip("/")
+        metadata = client.get(f"{issuer}/.well-known/oauth-authorization-server").json()
+        assert metadata["authorization_endpoint"] == "https://testserver/mcp/authorize"
+        assert metadata["token_endpoint"] == "https://testserver/mcp/token"
+        assert "S256" in metadata["code_challenge_methods_supported"]
+        assert client.get("/mcp/auth/callback").status_code == 400  # Missing callback parameters, not a missing route.
+
+        for token, status in [("invalid", 401), ("denied", 401), ("allowed", 200)]:
+            headers["Authorization"] = f"Bearer {token}"
+            assert client.get("/api/formulas", headers=headers).status_code == status
+            assert client.post("/mcp/", headers=headers, json=initialize).status_code == status
+
+
 def test_topology_run_uses_fastapi_and_rejects_stdio(monkeypatch):
     topology = Topology(FakeFormula(), FakeCatalyst())
     calls = []
