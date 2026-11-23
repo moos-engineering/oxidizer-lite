@@ -2,13 +2,14 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, TYPE_CHECKING
+from typing import Annotated
 import base64
 import json
 import re
 import uuid
 
 import yaml
+from fastmcp.server.auth import AuthProvider
 
 from oxidizer.core.formula import Formula, TERMINAL_RUN_STATUSES, _validate_sql_name
 from oxidizer.core.catalyst import Catalyst
@@ -16,9 +17,6 @@ from oxidizer.core.residue import log_stream_name
 from oxidizer.core.lattice import IcebergRestConnection, S3Connection, S3TablesConnection
 from oxidizer.utils.crucible import Crucible
 from oxidizer.utils.chisel import Chisel
-
-if TYPE_CHECKING:
-	from fastmcp.server.auth import AuthProvider
 
 try:
 	from fastapi import FastAPI

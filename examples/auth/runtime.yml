@@ -15,8 +15,8 @@ catalyst:
 topology:
   oauth:
     provider: github
-    client_id: "YOUR_GITHUB_OAUTH_CLIENT_ID"
-    client_secret: ""
+    client_id: YOUR_GITHUB_OAUTH_CLIENT_ID
+    client_secret: YOUR_GITHUB_OAUTH_CLIENT_SECRET
     base_url: http://localhost:8028
     allowed_github_user_ids: [12345678]
 

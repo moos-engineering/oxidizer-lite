@@ -88,6 +88,29 @@ workflow:
               - method: stream
 ```
 
+A node can also read from multiple upstream nodes by declaring one input per
+upstream `ref`. For example, a downstream node can receive order and customer
+records separately:
+
+```yaml
+- name: enrich_orders
+  inputs:
+    - ref: daily-users.bronze.fetch_orders
+      alias: orders
+      methods:
+        - method: stream
+    - ref: daily-users.bronze.fetch_customers
+      alias: customers
+      methods:
+        - method: stream
+```
+
+Each `ref` must identify an upstream node in the Formula. The handler receives
+the current batches separately as `data["orders"]` and `data["customers"]`;
+the inputs are not automatically joined or paired row-by-row. Combine them in
+the handler, or use one SQL input with multiple catalog bindings when the join
+should be performed by DuckDB.
+
 Create the formula through the public facade:
 
 ```python
