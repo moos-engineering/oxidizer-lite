@@ -184,7 +184,7 @@ def test_topology_health_and_formula_tools_and_routes():
     tools = asyncio.run(topology.mcp._list_tools() if hasattr(topology.mcp, "_list_tools") else topology.mcp.list_tools())
     assert {tool.name for tool in tools} == {
         "list_formulas", "get_formula", "list_formula_states", "get_formula_state", "get_node_state", "upload_config", "list_formula_logs",
-        "upload_config", "list_connections", "list_schemas", "list_sql", "query", "list_formula_runs", "list_active_formula_runs", "get_transport_health", "search_docs", "read_doc", "get_docs_search_status",
+        "upload_config", "list_connections", "list_schemas", "list_sql", "query", "list_formula_runs", "list_active_formula_runs", "get_transport_health", "get_backend_stats", "search_docs", "read_doc", "get_docs_search_status",
     }
     assert topology.list_formulas() == ["daily-users", "orders"]
     assert formula.list_calls == 4
@@ -298,6 +298,8 @@ def test_api_runtime_shares_github_auth_between_rest_and_mcp(oauth_api_runtime, 
 
     _, run = oauth_api_runtime
     topology = run()["topology"]
+    monkeypatch.setattr(topology.formula, "get_stats", lambda: {}, raising=False)
+    monkeypatch.setattr(topology.catalyst, "get_stats", lambda: {}, raising=False)
 
     async def verify_upstream(self, token):
         subject = {"allowed": "123", "denied": "456"}.get(token)
@@ -315,6 +317,7 @@ def test_api_runtime_shares_github_auth_between_rest_and_mcp(oauth_api_runtime, 
     }
     with TestClient(topology.app, base_url="https://testserver") as client:
         assert client.get("/api/health").status_code == 200
+        assert client.get("/api/backend/stats").status_code == 401
         assert client.post("/api/configs", json={"content": "not YAML"}).status_code == 401
         headers = {"Accept": "application/json, text/event-stream"}
         response = client.post("/mcp/", headers=headers, json=initialize)
@@ -333,6 +336,7 @@ def test_api_runtime_shares_github_auth_between_rest_and_mcp(oauth_api_runtime, 
         for token, status in [("invalid", 401), ("denied", 401), ("allowed", 200)]:
             headers["Authorization"] = f"Bearer {token}"
             assert client.get("/api/formulas", headers=headers).status_code == status
+            assert client.get("/api/backend/stats", headers=headers).status_code == status
             assert client.post("/mcp/", headers=headers, json=initialize).status_code == status
 
 
@@ -443,6 +447,84 @@ def test_topology_mcp_run_listing_and_transport_health_are_read_only():
     for tool in tools:
         if tool.name in {"list_formula_runs", "list_active_formula_runs", "get_transport_health"}:
             assert tool.annotations.model_dump(by_alias=True)["readOnlyHint"] is True
+
+
+def test_topology_stats_rest_and_mcp_match_and_are_read_only(monkeypatch):
+    formula, catalyst = FakeFormula(), FakeCatalyst()
+    monkeypatch.setattr(formula, "get_stats", lambda: {
+        "backend": "s3", "storage": {"bytes": 12, "objects": 1, "scope": "configured_bucket_and_prefix"},
+    }, raising=False)
+    monkeypatch.setattr(catalyst, "get_stats", lambda: {
+        "backend": "redis", "memory": {"status": "ok", "scope": "redis_server", "used_bytes": 20,
+                                      "maxmemory_bytes": 0, "maxmemory_headroom_bytes": None},
+    }, raising=False)
+    topology = Topology(formula, catalyst)
+    topology.register_api_endpoints()
+    topology.register_mcp_tools()
+    client = TestClient(topology.app)
+    response = client.get("/api/backend/stats")
+    assert client.get("/api/stats").status_code == 404
+    result = asyncio.run(topology.mcp.call_tool("get_backend_stats", {}))
+    assert response.status_code == 200
+    assert response.json() == json.loads(result.content[0].text) == topology.get_backend_stats()
+    tools = asyncio.run(topology.mcp._list_tools() if hasattr(topology.mcp, "_list_tools") else topology.mcp.list_tools())
+    tool = next(tool for tool in tools if tool.name == "get_backend_stats")
+    assert tool.annotations.model_dump(by_alias=True)["readOnlyHint"] is True
+    assert catalyst.writes == [] and formula.uploads == {}
+
+
+def test_stats_scan_does_not_block_health_route(monkeypatch):
+    import threading
+    import httpx
+
+    formula, catalyst = FakeFormula(), FakeCatalyst()
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def scan():
+        started.set()
+        release.wait(timeout=3)
+        finished.set()
+        return {}
+
+    monkeypatch.setattr(formula, "get_stats", scan, raising=False)
+    monkeypatch.setattr(catalyst, "get_stats", lambda: {}, raising=False)
+    topology = Topology(formula, catalyst)
+    topology.register_api_endpoints()
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=topology.app), base_url="http://test") as client:
+            stats = asyncio.create_task(client.get("/api/backend/stats"))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                response = await client.get("/api/health")
+                assert response.status_code == 200
+                assert not finished.is_set()
+            finally:
+                release.set()
+                await stats
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("failed_backend", ["formula", "catalyst"])
+def test_topology_stats_errors_are_sanitized(monkeypatch, failed_backend):
+    from fastmcp.exceptions import ToolError
+
+    formula, catalyst = FakeFormula(), FakeCatalyst()
+    for backend in (formula, catalyst):
+        monkeypatch.setattr(backend, "get_stats", lambda: {}, raising=False)
+    def fail():
+        raise RuntimeError("private connection details")
+    monkeypatch.setattr(formula if failed_backend == "formula" else catalyst, "get_stats", fail)
+    topology = Topology(formula, catalyst)
+    topology.register_api_endpoints()
+    topology.register_mcp_tools()
+    response = TestClient(topology.app).get("/api/backend/stats")
+    assert response.status_code == 503
+    assert response.json() == {"error": "Unable to inspect backend statistics"}
+    with pytest.raises(ToolError) as error:
+        asyncio.run(topology.mcp.call_tool("get_backend_stats", {}))
+    assert "private" not in str(error.value)
 
 
 @pytest.mark.parametrize("error,status", [

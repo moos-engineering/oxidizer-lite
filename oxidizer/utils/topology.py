@@ -87,6 +87,13 @@ class Topology:
 	def get_docs_search_status(self) -> dict:
 		return self.documentation.get_search_status()
 
+	def get_backend_stats(self) -> dict:
+		"""Inspect the configured Catalyst and Formula backends."""
+		try:
+			return {"catalyst": self.catalyst.get_stats(), "formula": self.formula.get_stats()}
+		except Exception:
+			raise RuntimeError("Unable to inspect backend statistics") from None
+
 	def get_transport_health(self, stream_name: str, group_name: str | None = None) -> dict:
 		"""Inspect primary Catalyst metadata without consuming or changing messages."""
 		if not isinstance(stream_name, str) or not stream_name.strip():
@@ -300,6 +307,7 @@ class Topology:
 		from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 		from starlette.requests import Request
 		from starlette.responses import JSONResponse
+		from starlette.concurrency import run_in_threadpool
 
 		@self.app.get("/api/health", name="api_health")
 		async def api_health(request: Request):
@@ -319,6 +327,13 @@ class Topology:
 
 			dependencies.append(Depends(require_access))
 		router = APIRouter(dependencies=dependencies)
+
+		@router.get("/api/backend/stats", name="api_backend_stats")
+		async def api_backend_stats(request: Request):
+			try:
+				return JSONResponse(await run_in_threadpool(self.get_backend_stats))
+			except RuntimeError:
+				return JSONResponse({"error": "Unable to inspect backend statistics"}, status_code=503)
 
 		@router.get("/api/docs/status", name="api_docs_status")
 		async def api_docs_status(request: Request):
@@ -546,6 +561,14 @@ class Topology:
 		def list_formulas_tool() -> list[str]:
 			"""List workflow formula IDs stored by Formula."""
 			return self.list_formulas()
+
+		@self.mcp.tool(
+			name="get_backend_stats",
+			annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True},
+		)
+		def get_backend_stats_tool() -> dict:
+			"""Report primary Catalyst and Formula backend usage; S3 scans the configured bucket and prefix."""
+			return self.get_backend_stats()
 
 		@self.mcp.tool(
 			name="get_transport_health",

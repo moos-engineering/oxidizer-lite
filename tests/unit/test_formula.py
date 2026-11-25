@@ -95,6 +95,86 @@ def test_formula_uses_redis_backend_with_injected_client():
 
     assert formula.list_formula_configs() == []
 
+@pytest.mark.parametrize("limit,headroom", [(0, None), (1000, 800), (100, 0), (None, None)])
+def test_redis_backend_stats_report_server_memory(limit, headroom):
+    from oxidizer import Catalyst
+
+    class Client:
+        def info(self, section):
+            assert section == "memory"
+            return {"used_memory": 200, "maxmemory": limit, "total_system_memory": 9999}
+
+    connection = RedisConnection(client=Client())
+    memory = {
+        "status": "ok", "scope": "redis_server", "used_bytes": 200,
+        "maxmemory_bytes": limit, "maxmemory_headroom_bytes": headroom,
+    }
+    assert Formula(connection).get_stats() == {"backend": "redis", "memory": memory}
+    assert Catalyst(connection).get_stats() == {"backend": "redis", "memory": memory}
+
+
+def test_backend_stats_mark_kafka_and_redis_cluster_unsupported():
+    from oxidizer import Catalyst, KafkaConnection
+
+    assert Catalyst(KafkaConnection(client=object())).get_stats() == {
+        "backend": "kafka", "memory": {"status": "unsupported", "reason": "not_redis"},
+    }
+    connection = RedisConnection(client=object(), cluster=True)
+    assert Formula(connection).get_stats()["memory"] == {"status": "unsupported", "reason": "redis_cluster"}
+    assert Catalyst(connection).get_stats()["memory"] == {"status": "unsupported", "reason": "redis_cluster"}
+
+
+def test_redis_backend_stats_reject_missing_usage():
+    class Client:
+        def info(self, section):
+            return {"maxmemory": 0}
+
+    with pytest.raises(ValueError, match="usage is unavailable"):
+        Formula(RedisConnection(client=Client())).get_stats()
+
+
+@pytest.mark.parametrize("prefix,expected_prefix", [("formulae", "formulae/"), ("", "")])
+def test_s3_formula_stats_sum_all_pages_in_configured_scope(prefix, expected_prefix):
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def list_objects_v2(self, **options):
+            self.calls.append(options)
+            if "ContinuationToken" not in options:
+                return {"Contents": [{"Size": 12}, {"Size": 0}], "IsTruncated": True,
+                        "NextContinuationToken": "next"}
+            return {"Contents": [{"Size": 30}], "IsTruncated": False}
+
+    client = Client()
+    result = Formula(S3Connection(bucket="demo", prefix=prefix, client=client)).get_stats()
+    assert result == {"backend": "s3", "storage": {
+        "bytes": 42, "objects": 3, "scope": "configured_bucket_and_prefix",
+    }}
+    assert client.calls == [
+        {"Bucket": "demo", "Prefix": expected_prefix},
+        {"Bucket": "demo", "Prefix": expected_prefix, "ContinuationToken": "next"},
+    ]
+
+
+def test_s3_formula_stats_empty_and_incomplete_scan():
+    class Client:
+        response = {"IsTruncated": False}
+
+        def list_objects_v2(self, **options):
+            return self.response
+
+    client = Client()
+    formula = Formula(S3Connection(bucket="demo", client=client))
+    assert formula.get_stats()["storage"]["bytes"] == 0
+    assert formula.get_stats()["storage"]["objects"] == 0
+    client.response = {"Contents": [{"Size": 1}], "IsTruncated": True, "NextContinuationToken": "same"}
+    with pytest.raises(ValueError, match="continuation token"):
+        formula.get_stats()
+    client.response = {"Contents": [{"Key": "missing-size"}], "IsTruncated": False}
+    with pytest.raises(KeyError):
+        formula.get_stats()
+
 
 @pytest.fixture(params=["s3", "redis"])
 def indexed_formula(request):

@@ -108,6 +108,10 @@ class S3Formula(_RunIndex):
         """
         return self.connection.object_key(f"states/{formula_id}/{run_id}.yml")
 
+    def get_stats(self) -> dict:
+        """Count current objects under the configured bucket and prefix."""
+        return {"backend": "s3", "storage": self.connection.get_storage_stats()}
+
     def list_formula_configs(self):
         """List YAML workflow IDs across all S3 pages under ``formulas/``.
 
@@ -618,6 +622,10 @@ class RedisFormula(_RunIndex):
         self.residue = residue
         self.backend = "redis"
 
+    def get_stats(self) -> dict:
+        """Report memory for the Redis server backing Formula."""
+        return {"backend": "redis", "memory": self.connection.get_memory_stats()}
+
     @staticmethod
     def _state_key(formula_id: str, run_id: str) -> str:
         """Build the Redis key identifying one Formula run state."""
@@ -1099,6 +1107,10 @@ class Formula:
             self.formula = RedisFormula(connection, self.residue)
         else:
             raise ValueError("Unsupported connection type.")
+
+    def get_stats(self) -> dict:
+        """Return statistics for the configured persistence backend."""
+        return self.formula.get_stats()
 
     def list_formula_configs(self):
         """List workflow IDs available in the selected backend.

@@ -316,6 +316,10 @@ class RedisCatalyst:
             "groups_truncated": len(groups) > 100,
         }
 
+    def get_stats(self) -> dict:
+        """Report memory for the Redis server backing Catalyst."""
+        return {"backend": "redis", "memory": self.connection.get_memory_stats()}
+
     def ack_message(self, topic_name: str, group_name: str, message_id: str, consumer_name: str | None = None):
         """Acknowledge a pending entry for a Redis consumer group.
 
@@ -633,6 +637,10 @@ class KafkaCatalyst:
         """Return no topics; topic discovery is not implemented for Kafka."""
         return []
 
+    def get_stats(self) -> dict:
+        """Indicate that Redis memory statistics do not apply to Kafka."""
+        return {"backend": "kafka", "memory": {"status": "unsupported", "reason": "not_redis"}}
+
     def get_transport_health(self, topic_name: str, group_name: str | None = None) -> dict:
         """Describe a topic and offsets through admin APIs, without consuming."""
         from confluent_kafka import ConsumerGroupTopicPartitions, TopicCollection, TopicPartition
@@ -924,6 +932,10 @@ class Catalyst:
         if group_name is not None and (not isinstance(group_name, str) or not group_name.strip()):
             raise ValueError("group_name must be a non-empty string when supplied")
         return self.catalyst.get_transport_health(topic_name, group_name)
+
+    def get_stats(self) -> dict:
+        """Return memory statistics for the primary transport backend."""
+        return self.catalyst.get_stats()
 
     def ack_message(self, topic_name: str, group_name: str, msg_id: str, consumer_name: str | None = None):
         """
