@@ -1,0 +1,66 @@
+name: oxidizer-auth
+
+x-runtime: &runtime
+  image: oxidizer-auth:local
+  volumes:
+    - .:/example:ro
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_VOLUMES: /data
+
+  seed:
+    <<: *runtime
+    command: ["python", "/example/demo.py"]
+    depends_on:
+      rustfs:
+        condition: service_started
+
+  api:
+    <<: *runtime
+    image: oxidizer-auth:local-api
+    build:
+      context: ../..
+      dockerfile: docker/oxidizer-lite.dockerfile
+      target: api
+    command: ["python", "-m", "app.api", "--config", "/example/runtime.yml"]
+    ports:
+      - "127.0.0.1:8028:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  controller:
+    <<: *runtime
+    build:
+      context: ../..
+      dockerfile: docker/oxidizer-lite.dockerfile
+      target: runtime
+    command: ["python", "-m", "app.controller", "--config", "/example/runtime.yml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *runtime
+    command: ["python", "-m", "app.worker", "--config", "/example/runtime.yml"]
+    depends_on:
+      redis:
+        condition: service_healthy

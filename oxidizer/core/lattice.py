@@ -262,6 +262,35 @@ class S3Connection(Lattice):
         key = key.lstrip("/")
         return f"{self.prefix}/{key}" if self.prefix else key
 
+    def get_storage_stats(self) -> dict:
+        """Count current objects under this connection's bucket and prefix."""
+        if not self.bucket:
+            raise ValueError("S3 bucket is required")
+        options = {"Bucket": self.bucket, "Prefix": self.object_key("")}
+        total_bytes = 0
+        objects = 0
+        seen_tokens = set()
+        while True:
+            response = self.client.list_objects_v2(**options)
+            for item in response.get("Contents", []):
+                size = item["Size"]
+                if type(size) is not int or size < 0:
+                    raise ValueError("S3 object size is invalid")
+                total_bytes += size
+                objects += 1
+            if not response["IsTruncated"]:
+                break
+            token = response["NextContinuationToken"]
+            if not isinstance(token, str) or not token or token in seen_tokens:
+                raise ValueError("S3 continuation token is invalid")
+            seen_tokens.add(token)
+            options["ContinuationToken"] = token
+        return {
+            "bytes": total_bytes,
+            "objects": objects,
+            "scope": "configured_bucket_and_prefix",
+        }
+
 
 class IcebergRestConnection(Lattice):
     """Pair an S3 storage connection with an Iceberg REST catalog.
@@ -734,6 +763,25 @@ class RedisConnection(Lattice):
             kwargs["client_name"] = self.client_name
 
         return {key: value for key, value in kwargs.items() if value is not None}
+
+    def get_memory_stats(self) -> dict:
+        """Report Redis server memory, without treating it as component usage."""
+        if self.cluster or callable(getattr(self.client, "get_nodes", None)):
+            return {"status": "unsupported", "reason": "redis_cluster"}
+        info = self.client.info("memory")
+        used = info.get("used_memory")
+        limit = info.get("maxmemory")
+        if type(used) is not int or used < 0:
+            raise ValueError("Redis memory usage is unavailable")
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("Redis memory limit is invalid")
+        return {
+            "status": "ok",
+            "scope": "redis_server",
+            "used_bytes": used,
+            "maxmemory_bytes": limit,
+            "maxmemory_headroom_bytes": max(0, limit - used) if limit else None,
+        }
 
 
 class KafkaConnection(Lattice):

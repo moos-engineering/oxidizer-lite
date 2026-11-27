@@ -24,9 +24,45 @@ The example defaults to HTTP on `127.0.0.1:8000`. Configure it with:
 | `OXIDIZER_TOPOLOGY_HOST` | `127.0.0.1` | HTTP bind host. |
 | `OXIDIZER_TOPOLOGY_PORT` | `8000` | HTTP bind port. |
 
-The example binds to loopback by default. The API has no authentication; `POST /api/configs` can replace stored configuration and `POST /api/invocations` can start workflows, so do not expose the server to an untrusted network without access control.
+The skeleton example binds to loopback and runs without authentication.
+`POST /api/configs` can replace stored configuration and `POST /api/invocations`
+can start workflows, so do not expose an unauthenticated server to an untrusted
+network.
 
-All routes return JSON. Send `Content-Type: application/json` with POST requests.
+REST API routes return JSON. Send `Content-Type: application/json` with REST POST requests.
+
+## Optional GitHub OAuth
+
+For the API image, add an optional block to its runtime YAML:
+
+```yaml
+topology:
+  oauth:
+    provider: github
+    client_id: "YOUR_GITHUB_OAUTH_CLIENT_ID"
+    client_secret: ""
+    base_url: https://topology.example.com
+    allowed_github_user_ids: [12345678]
+```
+
+Supply a nonempty `client_secret` through your secure runtime configuration
+loader. The API uses the loaded value directly; it does not look up an
+environment variable or resolve a secret reference. Do not commit the real
+value. Register `https://topology.example.com/mcp/auth/callback` as the GitHub
+OAuth app callback.
+Use the public origin without `/mcp`; HTTPS is required except on loopback.
+`github` is currently the only supported provider. Omit `topology.oauth` to
+preserve unauthenticated operation; an incomplete block fails startup.
+
+FastMCP handles discovery and browser sign-in at the existing `/mcp` endpoint.
+An OAuth-capable MCP client can discover and initiate GitHub sign-in from that
+URL. Protected REST requests accept the same provider-issued token as
+`Authorization: Bearer <token>`. Access requires a verified GitHub user ID on
+the allowlist. `/api/health` remains public.
+
+The API entry point constructs the provider and passes it as `auth` to
+`Topology`; library callers may also supply a configured FastMCP auth provider
+without using runtime YAML.
 
 ## Health Route
 
@@ -37,6 +73,55 @@ All routes return JSON. Send `Content-Type: application/json` with POST requests
 ```
 
 This is a basic process health response, not a readiness check for Formula storage, Redis, or downstream services.
+
+## Backend Statistics
+
+`GET /api/backend/stats` and the read-only MCP tool `get_backend_stats()` return the same
+snapshot for the primary Catalyst and configured Formula backends:
+
+```json
+{
+  "catalyst": {
+    "backend": "redis",
+    "memory": {
+      "status": "ok",
+      "scope": "redis_server",
+      "used_bytes": 104857600,
+      "maxmemory_bytes": 0,
+      "maxmemory_headroom_bytes": null
+    }
+  },
+  "formula": {
+    "backend": "s3",
+    "storage": {
+      "bytes": 2097152,
+      "objects": 42,
+      "scope": "configured_bucket_and_prefix"
+    }
+  }
+}
+```
+
+Redis memory comes from `INFO memory` and describes the entire Redis server,
+not the component's keys or a single Redis database. `maxmemory_bytes` is zero
+when no limit is configured, or null if not reported. Headroom is
+`max(0, maxmemory - used_memory)` for a positive limit and otherwise null; it
+is not available system memory. Catalyst and Formula can use different Redis
+servers or share one; do not add their figures together. Kafka Catalyst reports
+memory as `{"status":"unsupported","reason":"not_redis"}`. Redis Cluster
+connections report `{"status":"unsupported","reason":"redis_cluster"}` rather
+than presenting one node's usage as a cluster total.
+
+S3 storage sums the sizes of current objects in Formula's configured bucket
+and prefix, following all pages. An empty prefix covers the whole bucket; a
+shared prefix includes unrelated objects. This is logical object size, not
+physical or billed storage, and excludes noncurrent versions and incomplete
+multipart uploads. The scan is not an atomic snapshot, can be slow or incur
+listing charges, and requires `s3:ListBucket` permission for the prefix.
+It uses the configured S3-compatible endpoint and credentials and does not
+list other buckets. Backend failures return a generic HTTP 503 or MCP tool
+error, not a partial result. The route uses the same optional authorization
+as other protected API routes.
 
 ## Read-Only Transport Inspection
 
@@ -105,6 +190,7 @@ Example response:
 | --- | --- |
 | `GET /api/formulas` | `{"formulas":["..."]}` |
 | `GET /api/docs/status` | Documentation search readiness, hybrid mode, model identity, and structured error; HTTP 503 when unavailable. |
+| `GET /api/backend/stats` | Read-only Catalyst and Formula backend usage statistics. |
 | `GET /api/transport/health?stream_name=...&group_name=...` | Read-only primary-Catalyst metadata for one stream/topic; group is optional. |
 | `GET /api/connections` | `{"connections":["..."]}` containing connection names sorted by name. Optional repeated `type` filters match stored connection types (e.g. `?type=redis&type=kafka`); omitted filters select `s3_tables`. Empty filters return 400. Settings and credentials are never returned. |
 | `GET /api/schemas` | `{"schemas":["..."]}` containing registered schema document names sorted by name. |
@@ -394,6 +480,9 @@ the package/container and restart the API when deploying newly added tools or
 updated bundled documentation.
 
 ### Runtime Inspection And Configuration
+
+`get_backend_stats()` returns the backend statistics described above, matching
+`GET /api/backend/stats`.
 
 `list_formula_runs(formula_id)` returns normalized run summaries with IDs,
 statuses, and start/completion timestamps, matching the REST run listing. Use it
